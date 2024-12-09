@@ -20,8 +20,8 @@ static constexpr size_t kAppWindowSize = 32;
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
-static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 10;
+static constexpr size_t kAppNumClients = 10;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 4;
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
-export HRD_REGISTRY_IP="192.168.31.9"
+export HRD_REGISTRY_IP="192.168.206.128"
 
 drop_shm
 
@@ -28,5 +28,5 @@ fi
 
 # Check for gdb mode
 if [ "$#" -eq 1 ]; then
-  sudo -E gdb -ex run --args ../build/sender-scalability $flags
+  sudo -E gdb -ex start --args ../build/sender-scalability $flags
 fi

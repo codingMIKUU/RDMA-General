@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
-export HRD_REGISTRY_IP="192.168.31.5"
+export HRD_REGISTRY_IP="192.168.206.128"
 
 drop_shm
 
@@ -39,5 +39,5 @@ fi
 
 # Check for gdb mode
 if [ "$#" -eq 2 ]; then
-  sudo -E gdb -ex run --args $executable $flags
+  sudo -E gdb -ex start --args $executable $flags
 fi
