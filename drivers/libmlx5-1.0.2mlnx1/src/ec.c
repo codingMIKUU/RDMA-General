@@ -237,7 +237,7 @@ struct ibv_qp *alloc_calc_qp(struct mlx5_ec_calc *calc)
 	/* modify to RTR */
 	memset(&qp_attr, 0, sizeof(qp_attr));
 	qp_attr.qp_state = IBV_QPS_RTR;
-	qp_attr.path_mtu = IBV_MTU_4096; /* FIXME: Is this correct? */
+	qp_attr.path_mtu = IBV_MTU_1024; /* FIXME: Is this correct? */
 	qp_attr.dest_qp_num = ibqp->qp_num;
 	qp_attr.rq_psn = 0;
 	qp_attr.max_dest_rd_atomic = 0;

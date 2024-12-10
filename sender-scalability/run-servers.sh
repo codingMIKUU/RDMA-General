@@ -17,7 +17,7 @@ flags="
   --use_uc 0 \
 	--is_client 0 \
 	--size 64 \
-	--run_time 10 \
+	--run_time 100 \
 	--do_read 1
 "
 
