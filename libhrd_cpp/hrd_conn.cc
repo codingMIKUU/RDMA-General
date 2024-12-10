@@ -72,7 +72,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
   cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
   assert(cb->pd != nullptr);
-  printf("thread %d at line 75: ibv_alloc_pd()  OK!\n",local_hid);
+  printf("thread %d at line 75: ibv_alloc_pd()  OK!\n", local_hid);
   int ib_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
                  IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_ATOMIC;
 
@@ -139,7 +139,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
             reinterpret_cast<volatile uint8_t*>(memalign(4096, reg_size));
         assert(cb->conn_buf != nullptr);
       }
-      // printf("thread %d at line 142: malloc_socket() OK!\n",local_hid);  
+      // printf("thread %d at line 142: malloc_socket() OK!\n",local_hid);
       memset(const_cast<uint8_t*>(cb->conn_buf), 0, reg_size);
       cb->conn_buf_mr = ibv_reg_mr(cb->pd, const_cast<uint8_t*>(cb->conn_buf),
                                    reg_size, ib_flags);
@@ -239,8 +239,8 @@ void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb) {
 
     // cb->dgram_send_cq[i] = ibv_exp_create_cq(
     //     cb->resolve.ib_ctx, kHrdSQDepth, nullptr, nullptr, 0, &cq_init_attr);
-    cb->dgram_send_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, kHrdSQDepth,
-                          nullptr, nullptr, 0);
+    cb->dgram_send_cq[i] =
+        ibv_create_cq(cb->resolve.ib_ctx, kHrdSQDepth, nullptr, nullptr, 0);
 
     // We sometimes set Mellanox env variables for hugepage-backed queues.
     rt_assert(cb->dgram_send_cq[i] != nullptr,
@@ -250,14 +250,13 @@ void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb) {
     // cb->dgram_recv_cq[i] =
     //     ibv_exp_create_cq(cb->resolve.ib_ctx, recv_queue_depth, nullptr,
     //                       nullptr, 0, &cq_init_attr);
-    cb->dgram_recv_cq[i] =
-        ibv_create_cq(cb->resolve.ib_ctx, recv_queue_depth,
-                          nullptr, nullptr, 0);
+    cb->dgram_recv_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, recv_queue_depth,
+                                         nullptr, nullptr, 0);
     rt_assert(cb->dgram_recv_cq[i] != nullptr, "Failed to create RECV CQ");
 
     // Create the QP
     // struct ibv_exp_qp_init_attr create_attr;
-    struct  ibv_qp_init_attr create_attr;
+    struct ibv_qp_init_attr create_attr;
     memset(&create_attr, 0, sizeof(struct ibv_qp_init_attr));
     // create_attr.comp_mask =
     //     IBV_EXP_QP_INIT_ATTR_PD | IBV_EXP_QP_INIT_ATTR_CREATE_FLAGS;
@@ -291,7 +290,7 @@ void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb) {
 
     rt_assert(
         // ibv_exp_modify_qp(cb->dgram_qp[i], &init_attr, init_comp_mask) == 0,
-      ibv_modify_qp(cb->dgram_qp[i], &init_attr, init_comp_mask) == 0,
+        ibv_modify_qp(cb->dgram_qp[i], &init_attr, init_comp_mask) == 0,
         "Failed to modify dgram QP to INIT");
 
     // RTR state
@@ -300,7 +299,8 @@ void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb) {
     memset(&rtr_attr, 0, sizeof(rtr_attr));
     rtr_attr.qp_state = IBV_QPS_RTR;
 
-    // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rtr_attr, IBV_QP_STATE) == 0,
+    // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rtr_attr, IBV_QP_STATE) ==
+    // 0,
     rt_assert(ibv_modify_qp(cb->dgram_qp[i], &rtr_attr, IBV_QP_STATE) == 0,
               "Failed to modify dgram QP to RTR");
 
@@ -314,7 +314,7 @@ void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb) {
     // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rts_attr,
     //                             IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
     rt_assert(ibv_modify_qp(cb->dgram_qp[i], &rts_attr,
-                                IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
+                            IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
               "Failed to modify dgram QP to RTS\n");
   }
 }
@@ -325,6 +325,7 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
   assert(cb->conn_config.num_qps >= 1 && cb->resolve.dev_port_id >= 1);
 
   for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
+    //CQ不需要PD
     cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
                                    nullptr, nullptr, 0);
     // We sometimes set Mellanox env variables for hugepage-backed queues.
@@ -404,8 +405,8 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
     //                       IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
     //                           IBV_QP_ACCESS_FLAGS)) {
     if (ibv_modify_qp(cb->conn_qp[i], &init_attr,
-                          IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
-                              IBV_QP_ACCESS_FLAGS)) {
+                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
+                          IBV_QP_ACCESS_FLAGS)) {
       fprintf(stderr, "Failed to modify conn QP to INIT\n");
       exit(-1);
     }
@@ -425,7 +426,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   struct ibv_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
-  conn_attr.path_mtu = IBV_MTU_4096;
+  conn_attr.path_mtu = IBV_MTU_1024;
   conn_attr.dest_qp_num = remote_qp_attr->qpn;
   conn_attr.rq_psn = kHrdDefaultPSN;
 
@@ -440,7 +441,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
     grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
     grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
 
-    grh.sgid_index = 0;
+    grh.sgid_index = 1;
     grh.hop_limit = 1;
   }
 
@@ -454,7 +455,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   }
 
   if (ibv_modify_qp(cb->conn_qp[n], &conn_attr, rtr_flags)) {
-    fprintf(stderr, "Failed to modify QP to RTR\n");
+    fprintf(stderr, "HRD: Failed to modify QP to RTR: %s\n", strerror(errno));
     assert(false);
   }
 
@@ -475,7 +476,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   }
 
   if (ibv_modify_qp(cb->conn_qp[n], &conn_attr, rts_flags)) {
-    fprintf(stderr, "HRD: Failed to modify QP to RTS\n");
+    fprintf(stderr, "HRD: Failed to modify QP to RTR: %s\n", strerror(errno));
     assert(false);
   }
 #else
@@ -483,7 +484,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   struct ibv_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
-  conn_attr.path_mtu = IBV_MTU_4096;
+  conn_attr.path_mtu = IBV_MTU_1024;
   conn_attr.dest_qp_num = remote_qp_attr->qpn;
   conn_attr.rq_psn = kHrdDefaultPSN;
 
@@ -525,7 +526,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   }
 
   // if (ibv_exp_modify_qp(cb->conn_qp[n], &conn_attr, rts_flags)) {
-  if (ibv_modify_qp(cb->conn_qp[n], &conn_attr, rts_flags)) { 
+  if (ibv_modify_qp(cb->conn_qp[n], &conn_attr, rts_flags)) {
     fprintf(stderr, "HRD: Failed to modify QP to RTS\n");
     assert(false);
   }

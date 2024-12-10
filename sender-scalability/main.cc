@@ -20,8 +20,8 @@ static constexpr size_t kAppWindowSize = 32;
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 10;
-static constexpr size_t kAppNumClients = 10;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 4;
 
@@ -102,7 +102,7 @@ void run_server(thread_params_t* params) {
   uint64_t seed = 0xdeadbeef;
 
   while (1) {
-    if (rolling_iter >= MB(4)) {
+    if (rolling_iter >= MB(1)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
       double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                            (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
@@ -162,7 +162,7 @@ void run_server(thread_params_t* params) {
       }
     }
 
-    wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
+    wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
     sgl.length = FLAGS_size;
@@ -177,6 +177,7 @@ void run_server(thread_params_t* params) {
     int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
+    //printf("%zu\n",rolling_iter);
   }
 }
 

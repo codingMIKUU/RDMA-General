@@ -152,7 +152,8 @@ struct hrd_ctrl_blk* hrd_ctrl_blk_init(
 
         /* SHM key 0 is hard to free later */
         assert(conn_buf_shm_key >= 1 && conn_buf_shm_key <= 128);
-        // printf("line 155 reg_size before hrd_malloc_socket %d byte \n", reg_size);
+        // printf("line 155 reg_size before hrd_malloc_socket %d byte \n",
+        // reg_size);
         cb->conn_buf = (volatile uint8_t*)hrd_malloc_socket(
             conn_buf_shm_key, reg_size, numa_node_id);
       } else {
@@ -440,7 +441,7 @@ void hrd_connect_qp(struct hrd_ctrl_blk* cb, int n,
   struct ibv_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
-  conn_attr.path_mtu = IBV_MTU_4096;
+  conn_attr.path_mtu = IBV_MTU_1024;
   conn_attr.dest_qp_num = remote_qp_attr->qpn;
   conn_attr.rq_psn = HRD_DEFAULT_PSN;
 
@@ -481,7 +482,7 @@ void hrd_connect_qp(struct hrd_ctrl_blk* cb, int n,
   }
 
   if (ibv_modify_qp(cb->conn_qp[n], &conn_attr, rts_flags)) {
-    fprintf(stderr, "HRD: Failed to modify QP to RTS\n");
+    fprintf(stderr, "HRD: Failed to modify QP to RTR: %s\n", strerror(errno));
     assert(false);
   }
 #endif
@@ -490,7 +491,7 @@ void hrd_connect_qp(struct hrd_ctrl_blk* cb, int n,
   struct ibv_exp_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_exp_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
-  conn_attr.path_mtu = IBV_MTU_4096;
+  conn_attr.path_mtu = IBV_MTU_1024;
   conn_attr.dest_qp_num = remote_qp_attr->qpn;
   conn_attr.rq_psn = HRD_DEFAULT_PSN;
 

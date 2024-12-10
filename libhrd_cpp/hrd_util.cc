@@ -127,7 +127,7 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
 
         // Resolve and cache the ibv_gid struct for RoCE
         if (kRoCE) {
-          int ret = ibv_query_gid(ib_ctx, resolve.dev_port_id, 0, &resolve.gid);
+          int ret = ibv_query_gid(ib_ctx, resolve.dev_port_id, 1, &resolve.gid);
           rt_assert(ret == 0, "Failed to query GID");
         }
 
