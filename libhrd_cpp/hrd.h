@@ -94,6 +94,7 @@ struct hrd_conn_config_t {
   // Required params
   size_t num_qps = 0;  // num_qps > 0 is used as a validity check
   bool use_uc;
+  bool use_xrc;
   volatile uint8_t* prealloc_buf;
   size_t buf_size;
   int buf_shm_key;
@@ -138,6 +139,8 @@ struct hrd_ctrl_blk_t {
   } resolve;
 
   struct ibv_pd* pd;  // A protection domain for this control block
+
+  struct ibv_xrcd* xrcd; //XRC domain
 
   // Connected QPs
   hrd_conn_config_t conn_config;

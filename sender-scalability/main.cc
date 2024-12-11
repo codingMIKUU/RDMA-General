@@ -43,6 +43,7 @@ DEFINE_uint64(dual_port, 0, "Use two ports?");
 DEFINE_uint64(use_uc, 0, "Use unreliable connected transport?");
 DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
+DEFINE_uint64(use_xrc,0,"Use XRC");
 
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
@@ -55,6 +56,7 @@ void run_server(thread_params_t* params) {
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
+  conn_config.use_xrc = (FLAGS_use_xrc == 1);
 
   auto* cb =
       hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr);

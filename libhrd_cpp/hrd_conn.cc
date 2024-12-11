@@ -66,11 +66,19 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
       assert(cb->dgram_buf_shm_key == -1);
     }
   }
-
   // Resolve the port into cb->resolve
   hrd_resolve_port_index(cb, port_index);
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
   cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+
+  // //处理XRCD
+  // if(cb->conn_config.use_xrc){
+  //   int fd;
+  //   ibv_xrcd_init_attr init_attr;
+  //   memset(&init_attr,0,sizeof(ibv_xrcd_init_attr));
+  //   init_attr.oflags = O_CREAT;
+  //   cb->xrcd = ibv_open_xrcd(cb->resolve.ib_ctx,&init_attr);
+  // }
   assert(cb->pd != nullptr);
   printf("thread %d at line 75: ibv_alloc_pd()  OK!\n", local_hid);
   int ib_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ |
