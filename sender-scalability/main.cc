@@ -2,6 +2,8 @@
 #include <limits>
 #include <thread>
 #include "libhrd_cpp/hrd.h"
+#include <fcntl.h>
+#include <algorithm>
 
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -17,10 +19,11 @@ static constexpr size_t kAppRunTimeSlack = 10;
 // the number of per-thread outstanding operations per thread with WRITEs is
 // O(NUM_CLIENTS * kAppUnsigBatch).
 static constexpr size_t kAppWindowSize = 32;
+static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumServers = 4;
 static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 4;
@@ -43,29 +46,37 @@ DEFINE_uint64(dual_port, 0, "Use two ports?");
 DEFINE_uint64(use_uc, 0, "Use unreliable connected transport?");
 DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
+DEFINE_uint64(use_xrc,0,"Use XRC");
 
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
+  int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumClients;
+  conn_config.num_qps = (FLAGS_use_xrc?kAppNumClientMachines: kAppNumClients);
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
+  conn_config.use_xrc = (FLAGS_use_xrc == 1);
+  conn_config.is_client = false;
+  conn_config.fst_client_t = false;
 
-  auto* cb =
-      hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr);
-
+  hrd_ctrl_blk_t* cb ;
+  if(conn_config.use_xrc == 0)
+    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr);
+  else 
+    cb = hrd_ctrl_blk_init_xrc(srv_gid,ib_port_index,0,&conn_config,nullptr,0);
   // Set the buffer to 0 so that we can detect READ completion by polling.
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
-  for (size_t i = 0; i < kAppNumClients; i++) {
+  for (size_t i = 0; i < conn_config.num_qps; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
-    hrd_publish_conn_qp(cb, i, srv_qp_name);
+    size_t clt_id =(cb->conn_config.use_xrc?i*clt_num_threads:i);
+    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, clt_id);
+    hrd_publish_conn_qp(cb,i, srv_qp_name);
   }
 
   hrd_qp_attr_t* clt_qp[kAppNumClients];
@@ -79,9 +90,12 @@ void run_server(thread_params_t* params) {
       if (clt_qp[i] == nullptr) usleep(20000);
     }
 
-    printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-    hrd_connect_qp(cb, i, clt_qp[i]);
-    hrd_wait_till_ready(clt_qp_name);
+    
+    if(!cb->conn_config.use_xrc || i%clt_num_threads == 0){
+      printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
+      hrd_connect_qp(cb, i, clt_qp[i]);
+      hrd_wait_till_ready(clt_qp_name);
+    }
   }
 
   printf("main: Server %zu ready\n", srv_gid);
@@ -147,15 +161,16 @@ void run_server(thread_params_t* params) {
 
     // Choose the next client to send a packet to
     size_t cn = hrd_fastrand(&seed) % kAppNumClients;
+    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.next = nullptr;
     wr.sg_list = &sgl;
 
-    wr.send_flags = nb_tx[cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    if (nb_tx[cn] % kAppUnsigBatch == 0 && nb_tx[cn] > 0) {
+    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0) {
       // This can happen if a client dies before the server
-      int ret = hrd_poll_cq_ret(cb->conn_cq[cn], 1, &wc);
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
         return;
@@ -171,10 +186,9 @@ void run_server(thread_params_t* params) {
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
     wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
     wr.wr.rdma.rkey = clt_qp[cn]->rkey;
-
-    nb_tx[cn]++;
-
-    int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
+    wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
+    nb_tx[qp_cn]++;
+    int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
     //printf("%zu\n",rolling_iter);
@@ -189,15 +203,24 @@ void run_client(thread_params_t* params) {
   int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumServers;
+  //TODO:xrcd fd
+  conn_config.xrcd_fd = open(SERVER_XRCD_FILE_PATH, O_RDONLY | O_CREAT, S_IRUSR | S_IRGRP);
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
+  conn_config.is_client = true;
+  conn_config.fst_client_t = (clt_gid%num_threads==0);
+  conn_config.use_xrc = (FLAGS_use_xrc == 1);
+  conn_config.num_qps = (!FLAGS_use_xrc||conn_config.fst_client_t? kAppNumServers:0);
+  conn_config.rnum_threads = kAppNumServers;
 
-  auto* cb =
-      hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr);
-
+  bool fst_client_t = conn_config.fst_client_t;
+  hrd_ctrl_blk_t* cb;
+  if(conn_config.use_xrc)
+    cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,fst_client_t);
+  else
+    cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr);
   // Set to some non-zero value so the server can detect READ completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
@@ -206,25 +229,25 @@ void run_client(thread_params_t* params) {
     sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
     hrd_publish_conn_qp(cb, i, clt_qp_name);
   }
+  if(!cb->conn_config.use_xrc || fst_client_t){
+    for (size_t i = 0; i < kAppNumServers; i++) {
+      char srv_qp_name[kHrdQPNameSize];
+      sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
 
-  for (size_t i = 0; i < kAppNumServers; i++) {
-    char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
+      hrd_qp_attr_t* srv_qp = nullptr;
+      while (srv_qp == nullptr) {
+        srv_qp = hrd_get_published_qp(srv_qp_name);
+        if (srv_qp == nullptr) usleep(20000);
+      }
 
-    hrd_qp_attr_t* srv_qp = nullptr;
-    while (srv_qp == nullptr) {
-      srv_qp = hrd_get_published_qp(srv_qp_name);
-      if (srv_qp == nullptr) usleep(20000);
+      printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
+      hrd_connect_qp(cb, i, srv_qp);
+
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+      hrd_publish_ready(clt_qp_name);
     }
-
-    printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-    hrd_connect_qp(cb, i, srv_qp);
-
-    char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
-    hrd_publish_ready(clt_qp_name);
   }
-
   printf("main: Client %zu READY\n", clt_gid);
 
   struct timespec run_start, run_end;
@@ -255,6 +278,7 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_dual_port <= 1, "Invalid dual_port");
   rt_assert(FLAGS_use_uc <= 1, "Invalid use_uc");
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
+  rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
   size_t num_threads;
   if (FLAGS_is_client == 1) {

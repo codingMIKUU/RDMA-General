@@ -83,7 +83,7 @@ struct hrd_qp_attr_t {
   uint16_t lid;
   uint32_t qpn;
   union ibv_gid gid;  ///< GID, used for only RoCE
-
+  uint32_t srqn;
   // Info about the RDMA buffer associated with this QP
   uintptr_t buf_addr;
   uint32_t buf_size;
@@ -94,12 +94,19 @@ struct hrd_conn_config_t {
   // Required params
   size_t num_qps = 0;  // num_qps > 0 is used as a validity check
   bool use_uc;
+  bool use_xrc;
+  bool is_client;
+  bool fst_client_t;
   volatile uint8_t* prealloc_buf;
   size_t buf_size;
   int buf_shm_key;
+  int xrcd_fd;
+  int rnum_threads;
+
 
   // Optional params with their default values
   size_t sq_depth = kHrdSQDepth;
+  size_t rq_depth = kHrdRQDepth;
   size_t max_rd_atomic = 16;
 
   std::string to_string() {
@@ -138,11 +145,14 @@ struct hrd_ctrl_blk_t {
   } resolve;
 
   struct ibv_pd* pd;  // A protection domain for this control block
+  //int xrcd_fd;
+  struct ibv_xrcd* xrcd; //XRC domain
 
   // Connected QPs
   hrd_conn_config_t conn_config;
   struct ibv_qp** conn_qp;
   struct ibv_cq** conn_cq;
+  struct ibv_srq** srq;
   volatile uint8_t* conn_buf;  // A buffer for RDMA over RC/UC QPs
   struct ibv_mr* conn_buf_mr;
 
@@ -164,6 +174,13 @@ hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
                                   hrd_conn_config_t* conn_config,
                                   hrd_dgram_config_t* dgram_config);
 
+//specified for XRC
+hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index,
+                                         size_t numa_node,
+                                         hrd_conn_config_t* conn_config,
+                                         hrd_dgram_config_t* dgram_config,
+                                         bool fst_clt_t);
+
 int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb);
 
 // Debug
@@ -171,6 +188,7 @@ void hrd_ibv_devinfo(void);
 
 void hrd_resolve_port_index(hrd_ctrl_blk_t* cb, size_t port_index);
 void hrd_create_conn_qps(hrd_ctrl_blk_t* cb);
+void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb);
 void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb);
 
 void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t conn_qp_idx,

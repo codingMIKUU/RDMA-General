@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
-export HRD_REGISTRY_IP="192.168.206.128"
+export HRD_REGISTRY_IP="192.168.1.6"
 
 drop_shm
 
@@ -27,9 +27,10 @@ fi
 flags="\
 	--dual_port 0 \
 	--use_uc 0 \
-  --run_time 100 \
+  --run_time 10 \
 	--is_client 1 \
-	--machine_id $1
+	--machine_id $1 \
+  --use_xrc 1
 "
 
 # Check for non-gdb mode
