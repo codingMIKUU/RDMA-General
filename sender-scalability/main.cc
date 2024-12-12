@@ -23,7 +23,7 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumServers = 4;
 static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 4;
@@ -46,15 +46,13 @@ DEFINE_uint64(dual_port, 0, "Use two ports?");
 DEFINE_uint64(use_uc, 0, "Use unreliable connected transport?");
 DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
-//当前XRC只支持一个服务器线程，对多个客户端线程
 DEFINE_uint64(use_xrc,0,"Use XRC");
 
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
-
-
+  int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
   conn_config.num_qps = (FLAGS_use_xrc?kAppNumClientMachines: kAppNumClients);
@@ -75,10 +73,10 @@ void run_server(thread_params_t* params) {
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
   for (size_t i = 0; i < conn_config.num_qps; i++) {
-    if(cb->conn_config.use_xrc && i!=0)continue;
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
-    hrd_publish_conn_qp(cb, i, srv_qp_name);
+    size_t clt_id =(cb->conn_config.use_xrc?i*clt_num_threads:i);
+    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, clt_id);
+    hrd_publish_conn_qp(cb,i, srv_qp_name);
   }
 
   hrd_qp_attr_t* clt_qp[kAppNumClients];
@@ -92,8 +90,9 @@ void run_server(thread_params_t* params) {
       if (clt_qp[i] == nullptr) usleep(20000);
     }
 
-    printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-    if(!cb->conn_config.use_xrc || i == 0){
+    
+    if(!cb->conn_config.use_xrc || i%clt_num_threads == 0){
+      printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
       hrd_connect_qp(cb, i, clt_qp[i]);
       hrd_wait_till_ready(clt_qp_name);
     }
@@ -162,7 +161,7 @@ void run_server(thread_params_t* params) {
 
     // Choose the next client to send a packet to
     size_t cn = hrd_fastrand(&seed) % kAppNumClients;
-    size_t qp_cn = cb->conn_config.use_xrc?0:cn;
+    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.next = nullptr;
@@ -206,14 +205,15 @@ void run_client(thread_params_t* params) {
   hrd_conn_config_t conn_config;
   //TODO:xrcd fd
   conn_config.xrcd_fd = open(SERVER_XRCD_FILE_PATH, O_RDONLY | O_CREAT, S_IRUSR | S_IRGRP);
-  conn_config.num_qps = kAppNumServers;
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
-  conn_config.fst_client_t = (clt_gid == 0 || FLAGS_machine_id!=0 && clt_gid%(FLAGS_machine_id*num_threads)==0);
+  conn_config.fst_client_t = (clt_gid%num_threads==0);
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
+  conn_config.num_qps = (!FLAGS_use_xrc||conn_config.fst_client_t? kAppNumServers:0);
+  conn_config.rnum_threads = kAppNumServers;
 
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
@@ -278,6 +278,7 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_dual_port <= 1, "Invalid dual_port");
   rt_assert(FLAGS_use_uc <= 1, "Invalid use_uc");
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
+  rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
   size_t num_threads;
   if (FLAGS_is_client == 1) {

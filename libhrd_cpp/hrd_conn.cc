@@ -282,14 +282,17 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
 
   // Create connected QPs and transition them to RTS.
   // Create and register connected QP RDMA buffer.
-  if (cb->conn_config.num_qps >= 1) {
+  if (cb->conn_config.num_qps >= 1 || cb->conn_config.rnum_threads>=1) {
     if(cb->conn_config.is_client && !fst_clt_t)
       cb->conn_qp =nullptr;
     else
-      cb->conn_qp = new ibv_qp*[1];
-    cb->conn_cq = new ibv_cq*[1];
+      cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps];
     if(cb->conn_config.is_client)
-      cb->srq = new ibv_srq;
+      cb->conn_cq = new ibv_cq*[cb->conn_config.rnum_threads];
+    else 
+      cb->conn_cq = new ibv_cq*[cb->conn_config.num_qps];
+    if(cb->conn_config.is_client)
+      cb->srq = new ibv_srq*[cb->conn_config.rnum_threads];
     hrd_create_conn_qps_xrc(cb);
     // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
     if (conn_config->prealloc_buf == nullptr) {
@@ -347,19 +350,27 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
   }
 
   //Destroy SRQ
-  if(cb->conn_config.is_client && cb->conn_config.use_xrc)
-    rt_assert(ibv_destroy_srq(cb->srq)==0,"Failed to destroy srq");
-  for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
+  if(cb->conn_config.is_client && cb->conn_config.use_xrc){
+    for(int i=0;i<cb->conn_config.rnum_threads;i++)
+      rt_assert(ibv_destroy_srq(cb->srq[i])==0,"Failed to destroy srq");
+  }
+  if(!cb->conn_config.use_xrc){
+    for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
 
-    if(cb->conn_config.use_xrc&&i!=0)
-      break;
-    if(!cb->conn_config.is_client ||cb->conn_config.fst_client_t)
       rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
                 "Failed to destroy connected QP");
-    rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
-              "Failed to destroy connected CQ");
-    
-
+      rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
+                "Failed to destroy connected CQ");
+    }
+  }else{
+    for(int i = 0 ;i<cb->conn_config.num_qps;i++){
+      rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
+          "Failed to destroy connected QP");
+    }
+    for(int i= 0;i<(cb->conn_config.is_client?cb->conn_config.rnum_threads:cb->conn_config.num_qps);i++){
+      rt_assert(ibv_destroy_cq(cb->conn_cq[i])==0,
+          "Faild to destroy connected CQ");
+    }
   }
 
   // Destroy memory regions
@@ -377,22 +388,43 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
     }
   }
 
-  if (cb->conn_config.num_qps > 0) {
-    assert(cb->conn_buf_mr != nullptr);
-    if (ibv_dereg_mr(cb->conn_buf_mr)) {
-      fprintf(stderr, "HRD: Couldn't deregister conn MR for cb %zu\n",
-              cb->local_hid);
-      return -1;
-    }
-
-    if (cb->numa_node != kHrdInvalidNUMANode) {
-      if (hrd_free(cb->conn_config.buf_shm_key,
-                   const_cast<uint8_t*>(cb->conn_buf))) {
-        fprintf(stderr, "HRD: Error freeing conn hugepages for cb %zu\n",
+  if(!cb->conn_config.use_xrc){
+    if (cb->conn_config.num_qps > 0) {
+      assert(cb->conn_buf_mr != nullptr);
+      if (ibv_dereg_mr(cb->conn_buf_mr)) {
+        fprintf(stderr, "HRD: Couldn't deregister conn MR for cb %zu\n",
                 cb->local_hid);
+        return -1;
       }
-    } else {
-      free(const_cast<uint8_t*>(cb->conn_buf));
+
+      if (cb->numa_node != kHrdInvalidNUMANode) {
+        if (hrd_free(cb->conn_config.buf_shm_key,
+                    const_cast<uint8_t*>(cb->conn_buf))) {
+          fprintf(stderr, "HRD: Error freeing conn hugepages for cb %zu\n",
+                  cb->local_hid);
+        }
+      } else {
+        free(const_cast<uint8_t*>(cb->conn_buf));
+      }
+    }
+  }else{
+    if (cb->conn_config.num_qps > 0 || cb->conn_config.rnum_threads>0) {
+      assert(cb->conn_buf_mr != nullptr);
+      if (ibv_dereg_mr(cb->conn_buf_mr)) {
+        fprintf(stderr, "HRD: Couldn't deregister conn MR for cb %zu\n",
+                cb->local_hid);
+        return -1;
+      }
+
+      if (cb->numa_node != kHrdInvalidNUMANode) {
+        if (hrd_free(cb->conn_config.buf_shm_key,
+                    const_cast<uint8_t*>(cb->conn_buf))) {
+          fprintf(stderr, "HRD: Error freeing conn hugepages for cb %zu\n",
+                  cb->local_hid);
+        }
+      } else {
+        free(const_cast<uint8_t*>(cb->conn_buf));
+      }
     }
   }
 
@@ -603,9 +635,9 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
 
 void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
   assert(cb->pd != nullptr && cb->resolve.ib_ctx != nullptr);
-  assert(cb->conn_config.num_qps >= 1 && cb->resolve.dev_port_id >= 1);
+  assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
-  for (size_t i = 0; i < 1; i++) {
+  for (size_t i = 0; i < (cb->conn_config.is_client?cb->conn_config.rnum_threads:cb->conn_config.num_qps); i++) {
     //CQ不需要PD
     cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
                                    nullptr, nullptr, 0);
@@ -624,7 +656,7 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
       srq_init_attr.pd = cb->pd;
       srq_init_attr.attr.max_sge = 1;
       srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-      cb->srq = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
+      cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
       rt_assert(cb->srq != nullptr,"Failed to Create srq");
     
     }
@@ -842,7 +874,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
 }
 
 void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
-  assert(n < cb->conn_config.num_qps);
+  assert(n < cb->conn_config.num_qps || cb->conn_config.use_xrc && n<cb->conn_config.rnum_threads);
   assert(strlen(qp_name) < kHrdQPNameSize - 1);
   assert(strstr(qp_name, kHrdReservedNamePrefix) == nullptr);
 
@@ -862,7 +894,7 @@ void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
   qp_attr.buf_size = cb->conn_config.buf_size;
   qp_attr.rkey = cb->conn_buf_mr->rkey;
   if(cb->conn_config.is_client && cb->conn_config.use_xrc){
-    int ret = ibv_get_srq_num(cb->srq,&(qp_attr.srqn));
+    int ret = ibv_get_srq_num(cb->srq[n],&(qp_attr.srqn));
     rt_assert(ret==0,"Failed to get srqn.");
   }
   hrd_publish(qp_attr.name, &qp_attr, sizeof(hrd_qp_attr_t));

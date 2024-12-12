@@ -101,6 +101,7 @@ struct hrd_conn_config_t {
   size_t buf_size;
   int buf_shm_key;
   int xrcd_fd;
+  int rnum_threads;
 
 
   // Optional params with their default values
@@ -151,7 +152,7 @@ struct hrd_ctrl_blk_t {
   hrd_conn_config_t conn_config;
   struct ibv_qp** conn_qp;
   struct ibv_cq** conn_cq;
-  struct ibv_srq* srq;
+  struct ibv_srq** srq;
   volatile uint8_t* conn_buf;  // A buffer for RDMA over RC/UC QPs
   struct ibv_mr* conn_buf_mr;
 
