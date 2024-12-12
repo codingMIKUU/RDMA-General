@@ -96,6 +96,7 @@ struct hrd_conn_config_t {
   bool use_uc;
   bool use_xrc;
   bool is_client;
+  bool fst_client_t;
   volatile uint8_t* prealloc_buf;
   size_t buf_size;
   int buf_shm_key;
@@ -177,7 +178,7 @@ hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index,
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
                                          hrd_dgram_config_t* dgram_config,
-                                         int div);
+                                         bool fst_clt_t);
 
 int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb);
 

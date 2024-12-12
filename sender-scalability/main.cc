@@ -3,6 +3,7 @@
 #include <thread>
 #include "libhrd_cpp/hrd.h"
 #include <fcntl.h>
+#include <algorithm>
 
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -56,13 +57,14 @@ void run_server(thread_params_t* params) {
 
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumClients;
+  conn_config.num_qps = (FLAGS_use_xrc?kAppNumClientMachines: kAppNumClients);
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
+  conn_config.fst_client_t = false;
 
   hrd_ctrl_blk_t* cb ;
   if(conn_config.use_xrc == 0)
@@ -72,7 +74,8 @@ void run_server(thread_params_t* params) {
   // Set the buffer to 0 so that we can detect READ completion by polling.
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
-  for (size_t i = 0; i < kAppNumClients; i++) {
+  for (size_t i = 0; i < conn_config.num_qps; i++) {
+    if(cb->conn_config.use_xrc && i!=0)continue;
     char srv_qp_name[kHrdQPNameSize];
     sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
     hrd_publish_conn_qp(cb, i, srv_qp_name);
@@ -90,9 +93,10 @@ void run_server(thread_params_t* params) {
     }
 
     printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-    if(!cb->conn_config.use_xrc || i == 0)
+    if(!cb->conn_config.use_xrc || i == 0){
       hrd_connect_qp(cb, i, clt_qp[i]);
-    hrd_wait_till_ready(clt_qp_name);
+      hrd_wait_till_ready(clt_qp_name);
+    }
   }
 
   printf("main: Server %zu ready\n", srv_gid);
@@ -208,11 +212,13 @@ void run_client(thread_params_t* params) {
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
+  conn_config.fst_client_t = (clt_gid == 0 || FLAGS_machine_id!=0 && clt_gid%(FLAGS_machine_id*num_threads)==0);
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
 
+  bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
   if(conn_config.use_xrc)
-    cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,FLAGS_machine_id * num_threads);
+    cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,fst_client_t);
   else
     cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr);
   // Set to some non-zero value so the server can detect READ completion
@@ -223,7 +229,7 @@ void run_client(thread_params_t* params) {
     sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
     hrd_publish_conn_qp(cb, i, clt_qp_name);
   }
-  if(!cb->conn_config.use_xrc || clt_gid%(FLAGS_machine_id * num_threads) == 0){
+  if(!cb->conn_config.use_xrc || fst_client_t){
     for (size_t i = 0; i < kAppNumServers; i++) {
       char srv_qp_name[kHrdQPNameSize];
       sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
@@ -235,8 +241,7 @@ void run_client(thread_params_t* params) {
       }
 
       printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-      if(clt_gid%(FLAGS_machine_id * num_threads) == 0||!cb->conn_config.use_xrc)
-        hrd_connect_qp(cb, i, srv_qp);
+      hrd_connect_qp(cb, i, srv_qp);
 
       char clt_qp_name[kHrdQPNameSize];
       sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);

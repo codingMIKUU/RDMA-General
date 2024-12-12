@@ -162,7 +162,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
                                          hrd_dgram_config_t* dgram_config,
-                                         int div) {
+                                         bool fst_clt_t) {
   if (kHrdMlx5Atomics) {
     rt_assert(!kRoCE, "mlx5 atomics not supported with RoCE");
     hrd_red_printf(
@@ -283,7 +283,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
   // Create connected QPs and transition them to RTS.
   // Create and register connected QP RDMA buffer.
   if (cb->conn_config.num_qps >= 1) {
-    if(cb->conn_config.is_client && local_hid%div!=0)
+    if(cb->conn_config.is_client && !fst_clt_t)
       cb->conn_qp =nullptr;
     else
       cb->conn_qp = new ibv_qp*[1];
@@ -346,14 +346,19 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
               "Failed to destroy dgram RECV CQ");
   }
 
+  //Destroy SRQ
+  if(cb->conn_config.is_client && cb->conn_config.use_xrc)
+    rt_assert(ibv_destroy_srq(cb->srq)==0,"Failed to destroy srq");
   for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
 
-    if(!cb->conn_config.use_xrc || i == 0){
+    if(cb->conn_config.use_xrc&&i!=0)
+      break;
+    if(!cb->conn_config.is_client ||cb->conn_config.fst_client_t)
       rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
                 "Failed to destroy connected QP");
-      rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
-                "Failed to destroy connected CQ");
-    }
+    rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
+              "Failed to destroy connected CQ");
+    
 
   }
 
@@ -391,12 +396,11 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
     }
   }
 
-  //Destroy SRQ
-  rt_assert(ibv_destroy_srq(cb->srq)==0,"Failed to destroy srq");
 
 
   //Destroy XRCD
-  rt_assert(ibv_close_xrcd(cb->xrcd)==0,"Failed to close XRCD");
+  if(cb->conn_config.is_client && cb->conn_config.use_xrc)
+    rt_assert(ibv_close_xrcd(cb->xrcd)==0,"Failed to close XRCD");
 
   // Destroy protection domain
   rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
@@ -608,23 +612,24 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
     // We sometimes set Mellanox env variables for hugepage-backed queues.
     rt_assert(cb->conn_cq[i] != nullptr,
               "Failed to create conn CQ. Check hugepages and SHM limits?");
-      if(cb->conn_config.is_client){
-    //Create srq
-    ibv_srq_init_attr_ex srq_init_attr;
-    memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
-    srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ |
-                              IBV_SRQ_INIT_ATTR_PD;
-    srq_init_attr.srq_type = IBV_SRQT_XRC;
-    srq_init_attr.xrcd = cb->xrcd;
-    srq_init_attr.cq = cb->conn_cq[i];
-    srq_init_attr.pd = cb->pd;
-    srq_init_attr.attr.max_sge = 1;
-    srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-    cb->srq = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
-    rt_assert(cb->srq != nullptr,"Failed to Create srq");
+    if(cb->conn_config.is_client){
+      //Create srq
+      ibv_srq_init_attr_ex srq_init_attr;
+      memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
+      srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ |
+                                IBV_SRQ_INIT_ATTR_PD;
+      srq_init_attr.srq_type = IBV_SRQT_XRC;
+      srq_init_attr.xrcd = cb->xrcd;
+      srq_init_attr.cq = cb->conn_cq[i];
+      srq_init_attr.pd = cb->pd;
+      srq_init_attr.attr.max_sge = 1;
+      srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
+      cb->srq = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
+      rt_assert(cb->srq != nullptr,"Failed to Create srq");
     
     }
-
+    if(cb->conn_config.is_client && !cb->conn_config.fst_client_t)
+      continue;
 #if (kHrdMlx5Atomics == false)
     struct ibv_qp_init_attr_ex create_attr;
     memset(&create_attr, 0, sizeof(struct ibv_qp_init_attr_ex));
@@ -632,20 +637,20 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
       create_attr.qp_type = IBV_QPT_XRC_RECV;
       create_attr.comp_mask = IBV_QP_INIT_ATTR_XRCD;
       create_attr.xrcd = cb->xrcd;
+      create_attr.recv_cq = cb->conn_cq[i];
+      create_attr.cap.max_recv_wr = 1;  // We don't do RECVs on conn QPs
+      create_attr.cap.max_recv_sge = 1;
+      create_attr.cap.max_inline_data = kHrdMaxInline;
     }else{
       create_attr.qp_type = IBV_QPT_XRC_SEND;
       create_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
       create_attr.pd = cb->pd;
+      create_attr.send_cq = cb->conn_cq[i];
+      create_attr.cap.max_send_wr = cb->conn_config.sq_depth;
+      create_attr.cap.max_send_sge = 1;
+      create_attr.cap.max_inline_data = kHrdMaxInline;
     }
     
-    create_attr.send_cq = cb->conn_cq[i];
-    create_attr.recv_cq = cb->conn_cq[i];
-
-    create_attr.cap.max_send_wr = cb->conn_config.sq_depth;
-    create_attr.cap.max_recv_wr = 1;  // We don't do RECVs on conn QPs
-    create_attr.cap.max_send_sge = 1;
-    create_attr.cap.max_recv_sge = 1;
-    create_attr.cap.max_inline_data = kHrdMaxInline;
 
     cb->conn_qp[i] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
@@ -847,7 +852,7 @@ void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
   hrd_qp_attr_t qp_attr;
   strcpy(qp_attr.name, qp_name);
   qp_attr.lid = cb->resolve.port_lid;
-  if(n==0||!cb->conn_config.use_xrc)
+  if(!cb->conn_config.use_xrc || !cb->conn_config.is_client || cb->conn_config.fst_client_t)
     qp_attr.qpn = cb->conn_qp[n]->qp_num;
   else 
     qp_attr.qpn = 0;

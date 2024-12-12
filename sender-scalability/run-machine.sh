@@ -27,9 +27,10 @@ fi
 flags="\
 	--dual_port 0 \
 	--use_uc 0 \
-  --run_time 100 \
+  --run_time 10 \
 	--is_client 1 \
-	--machine_id $1
+	--machine_id $1 \
+  --use_xrc 1
 "
 
 # Check for non-gdb mode
