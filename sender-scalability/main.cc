@@ -4,6 +4,7 @@
 #include "libhrd_cpp/hrd.h"
 #include <fcntl.h>
 #include <algorithm>
+#include <iostream>
 #include <vector>
 
 static constexpr size_t kAppBufSize = MB(2);
@@ -48,6 +49,8 @@ DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
 DEFINE_uint64(use_xrc,0,"Use XRC");
 DEFINE_uint64(test_lat,0,"Test latency");
+
+
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -294,6 +297,23 @@ void run_client(thread_params_t* params) {
   }
 }
 
+void set_thread_priority(std::thread &t) {
+    // 获取线程的原生句柄
+    pthread_t native_handle = t.native_handle();
+
+    // 定义调度参数
+    struct sched_param param;
+    int policy = SCHED_FIFO;
+
+    // 获取最大优先级
+    int max_priority = sched_get_priority_max(policy);
+    param.sched_priority = max_priority;
+
+    // 设置调度策略和优先级
+    if (pthread_setschedparam(native_handle, policy, &param) != 0) {
+        std::cerr << "Failed to set thread priority: " << strerror(errno) << std::endl;
+    }
+}
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   rt_assert(FLAGS_dual_port <= 1, "Invalid dual_port");
@@ -326,6 +346,8 @@ int main(int argc, char* argv[]) {
     if (FLAGS_is_client == 1) {
       param_arr[i].id = (FLAGS_machine_id * num_threads) + i;
       thread_arr[i] = std::thread(run_client, &param_arr[i]);
+      if(FLAGS_use_xrc && i==0)
+        set_thread_priority(thread_arr[i]);
     } else {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
