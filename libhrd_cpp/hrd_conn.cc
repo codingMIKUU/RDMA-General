@@ -779,7 +779,7 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
     grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
     grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
 
-    grh.sgid_index = 1;
+    grh.sgid_index = 0;
     grh.hop_limit = 1;
   }
 

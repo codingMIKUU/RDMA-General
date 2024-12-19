@@ -2,7 +2,18 @@
     "configurations": [
       {
         "name": "Linux",
-        "includePath": ["${workspaceFolder}/**/**/**","/usr/lib/gcc/x86_64-linux-gnu/9/include/**"],
+        "includePath": [
+          "/home/dell/zxm/rdma-core/build/include", 
+          "${workspaceFolder}/**/**/**",
+          "/usr/lib/gcc/x86_64-linux-gnu/9/include/**"
+        ],
+        "browse": {
+                "path": [
+                    "/home/dell/zxm/rdma-core/**/**/**"  
+                ],
+                "limitSymbolsToIncludedHeaders": true,
+                "databaseFilename": ""
+        },
         "defines": [],
         "compilerPath": "/usr/bin/gcc",
         "cStandard": "c11",
@@ -12,3 +23,4 @@
     ],
     "version": 4
   }
+  

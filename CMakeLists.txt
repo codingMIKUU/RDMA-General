@@ -17,7 +17,9 @@ set(LIBRARIES ${LIBRARIES} rt numa ibverbs pthread gflags memcached)
 
 include_directories(${CMAKE_SOURCE_DIR})
 include_directories(/usr/local/include)
+#include_directories(/home/dell/zxm/rdma-core/build/include)
 link_directories(/usr/local/lib)
+#link_directories(/home/dell/zxm/rdma-core/build/lib)
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
