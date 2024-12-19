@@ -4,6 +4,7 @@
 #include "libhrd_cpp/hrd.h"
 #include <fcntl.h>
 #include <algorithm>
+#include <vector>
 
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -47,7 +48,7 @@ DEFINE_uint64(use_uc, 0, "Use unreliable connected transport?");
 DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
 DEFINE_uint64(use_xrc,0,"Use XRC");
-
+DEFINE_uint64(test_lat,0,"Test latency");
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -109,14 +110,16 @@ void run_server(thread_params_t* params) {
 
   struct timespec run_start, run_end;
   struct timespec msr_start, msr_end;
+  struct timespec lat_start, lat_end;
   clock_gettime(CLOCK_REALTIME, &run_start);
   clock_gettime(CLOCK_REALTIME, &msr_start);
+  std::vector<double> lats;
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
 
   while (1) {
-    if (rolling_iter >= MB(1)) {
+    if (rolling_iter >= MB(4)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
       double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                            (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
@@ -147,6 +150,13 @@ void run_server(thread_params_t* params) {
 
       rolling_iter = 0;
       clock_gettime(CLOCK_REALTIME, &msr_start);
+
+      if(FLAGS_test_lat){
+        sort(lats.begin(),lats.end());
+        printf("Latency: min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
+               lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
+               lats[lats.size() * 99 / 100]);
+      }
     }
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
@@ -175,6 +185,12 @@ void run_server(thread_params_t* params) {
         hrd_ctrl_blk_destroy(cb);
         return;
       }
+      if(FLAGS_test_lat){
+        clock_gettime(CLOCK_REALTIME, &lat_end);
+        double lat_sec = (lat_end.tv_sec - lat_start.tv_sec) +
+                            (lat_end.tv_nsec - lat_start.tv_nsec) / 1000000000.0;
+        lats.push_back(lat_sec);
+      }
     }
 
     wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
@@ -188,6 +204,9 @@ void run_server(thread_params_t* params) {
     wr.wr.rdma.rkey = clt_qp[cn]->rkey;
     wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
     nb_tx[qp_cn]++;
+    if(FLAGS_test_lat){
+      clock_gettime(CLOCK_REALTIME, &lat_start);
+    }
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
