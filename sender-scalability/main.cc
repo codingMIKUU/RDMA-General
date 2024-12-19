@@ -24,11 +24,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 4;
-static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 20;
+static constexpr size_t kAppNumClients = 300;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4;
-
+static constexpr size_t kAppUnsigBatch = 1;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -64,6 +63,8 @@ void run_server(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
+  // if(FLAGS_use_xrc)
+  //   conn_config.sq_depth = kHrdSQDepth*10;
 
   hrd_ctrl_blk_t* cb ;
   if(conn_config.use_xrc == 0)
@@ -156,6 +157,7 @@ void run_server(thread_params_t* params) {
         printf("Latency: min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
                lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
                lats[lats.size() * 99 / 100]);
+        lats.clear();
       }
     }
 
