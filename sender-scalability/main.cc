@@ -25,8 +25,8 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 20;
-static constexpr size_t kAppNumClients = 300;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 30;
+static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
@@ -157,7 +157,7 @@ void run_server(thread_params_t* params) {
 
       if(FLAGS_test_lat){
         sort(lats.begin(),lats.end());
-        printf("Latency: min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
+        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
                lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
                lats[lats.size() * 99 / 100]);
         lats.clear();
@@ -183,18 +183,12 @@ void run_server(thread_params_t* params) {
     wr.sg_list = &sgl;
 
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0) {
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
       // This can happen if a client dies before the server
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
         return;
-      }
-      if(FLAGS_test_lat){
-        clock_gettime(CLOCK_REALTIME, &lat_end);
-        double lat_sec = (lat_end.tv_sec - lat_start.tv_sec) +
-                            (lat_end.tv_nsec - lat_start.tv_nsec) / 1000000000.0;
-        lats.push_back(lat_sec);
       }
     }
 
@@ -215,6 +209,17 @@ void run_server(thread_params_t* params) {
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
+    if(FLAGS_test_lat){
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy(cb);
+        return;
+      }
+      clock_gettime(CLOCK_REALTIME, &lat_end);
+      double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
+                          (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
+      lats.push_back(lat_sec);
+      }
     //printf("%zu\n",rolling_iter);
   }
 }

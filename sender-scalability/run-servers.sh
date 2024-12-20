@@ -17,9 +17,10 @@ flags="
   --use_uc 0 \
 	--is_client 0 \
 	--size 64 \
-	--run_time 100 \
+	--run_time 1000 \
 	--do_read 1 \
-	--use_xrc 1
+	--use_xrc 1 \
+	--test_lat 1
 "
 
 # Check for non-gdb mode
