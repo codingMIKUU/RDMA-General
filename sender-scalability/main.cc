@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <iostream>
 #include <vector>
+#include <pthread.h>
 
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -26,7 +27,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 30;
-static constexpr size_t kAppNumClients = 200;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 400;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
@@ -91,6 +92,7 @@ void run_server(thread_params_t* params) {
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
+      printf("stuck %s\n",clt_qp_name);
       clt_qp[i] = hrd_get_published_qp(clt_qp_name);
       if (clt_qp[i] == nullptr) usleep(20000);
     }
@@ -183,14 +185,14 @@ void run_server(thread_params_t* params) {
     wr.sg_list = &sgl;
 
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
-      // This can happen if a client dies before the server
-      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
-      if (ret == -1) {
-        hrd_ctrl_blk_destroy(cb);
-        return;
-      }
-    }
+    // if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+    //   // This can happen if a client dies before the server
+    //   int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+    //   if (ret == -1) {
+    //     hrd_ctrl_blk_destroy(cb);
+    //     return;
+    //   }
+    // }
 
     wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
@@ -209,7 +211,7 @@ void run_server(thread_params_t* params) {
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
-    if(FLAGS_test_lat){
+    if(FLAGS_test_lat||true){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
@@ -225,6 +227,16 @@ void run_server(thread_params_t* params) {
 }
 
 void run_client(thread_params_t* params) {
+  struct sched_param param;
+  int policy;
+  pthread_getschedparam(pthread_self(), &policy, &param);
+
+  int o_pri = param.sched_priority;
+
+  param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+  pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+
+
   constexpr size_t num_threads = kAppNumClients / kAppNumClientMachines;
 
   size_t clt_gid = params->id;  // Global ID of this server thread
@@ -278,6 +290,9 @@ void run_client(thread_params_t* params) {
     }
   }
   printf("main: Client %zu READY\n", clt_gid);
+  
+  param.sched_priority = o_pri;
+  pthread_setschedparam(pthread_self(), policy, &param);
 
   struct timespec run_start, run_end;
   clock_gettime(CLOCK_REALTIME, &run_start);
@@ -351,8 +366,8 @@ int main(int argc, char* argv[]) {
     if (FLAGS_is_client == 1) {
       param_arr[i].id = (FLAGS_machine_id * num_threads) + i;
       thread_arr[i] = std::thread(run_client, &param_arr[i]);
-      if(FLAGS_use_xrc && i==0)
-        set_thread_priority(thread_arr[i]);
+      // if(FLAGS_use_xrc && i==0)
+      //   set_thread_priority(thread_arr[i]);
     } else {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
