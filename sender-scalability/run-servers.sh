@@ -19,8 +19,9 @@ flags="
 	--size 64 \
 	--run_time 1000 \
 	--do_read 0 \
-	--use_xrc 1 \
-	--test_lat 0
+	--use_xrc 0 \
+	--test_lat 0 \
+	--use_srm 1
 "
 
 # Check for non-gdb mode

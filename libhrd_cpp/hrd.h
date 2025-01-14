@@ -166,6 +166,7 @@ struct hrd_ctrl_blk_t {
   struct ibv_mr* dgram_buf_mr;
 
   uint8_t pad[64];
+  struct ibv_ah** ahs;
 };
 
 // Major initialzation functions
@@ -180,6 +181,12 @@ hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index,
                                          hrd_conn_config_t* conn_config,
                                          hrd_dgram_config_t* dgram_config,
                                          bool fst_clt_t);
+  
+hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index,
+                                         size_t numa_node,
+                                         hrd_conn_config_t* conn_config,
+                                         hrd_dgram_config_t* dgram_config,
+                                         bool fst_clt_t);
 
 int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb);
 
@@ -189,9 +196,15 @@ void hrd_ibv_devinfo(void);
 void hrd_resolve_port_index(hrd_ctrl_blk_t* cb, size_t port_index);
 void hrd_create_conn_qps(hrd_ctrl_blk_t* cb);
 void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb);
+void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb);
 void hrd_create_dgram_qps(hrd_ctrl_blk_t* cb);
 
+int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb);
+
 void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t conn_qp_idx,
+                    hrd_qp_attr_t* remote_qp_attr);
+
+void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
                     hrd_qp_attr_t* remote_qp_attr);
 
 // Post 1 RECV for this queue pair for this buffer. Low performance.
@@ -246,6 +259,7 @@ void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
 
 // Publish the nth datagram queue pair from this cb with this name
 void hrd_publish_dgram_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
+void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
 
 struct hrd_qp_attr_t* hrd_get_published_qp(const char* qp_name);
 

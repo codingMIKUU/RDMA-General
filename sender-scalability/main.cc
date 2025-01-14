@@ -50,6 +50,7 @@ DEFINE_uint64(do_read, 0, "Do RDMA reads?");
 DEFINE_uint64(size, 0, "RDMA size");
 DEFINE_uint64(use_xrc,0,"Use XRC");
 DEFINE_uint64(test_lat,0,"Test latency");
+DEFINE_uint64(use_srm,0,"Test SRM QPs");
 
 
 void run_server(thread_params_t* params) {
@@ -226,6 +227,179 @@ void run_server(thread_params_t* params) {
   }
 }
 
+void run_server_srm(thread_params_t* params) {
+  size_t srv_gid = params->id;  // Global ID of this server thread
+  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
+  int clt_num_threads = kAppNumClients/kAppNumClientMachines;
+
+  hrd_conn_config_t conn_config;
+  conn_config.num_qps = kAppNumClientMachines;
+  conn_config.use_uc = (FLAGS_use_uc == 1);
+  conn_config.prealloc_buf = nullptr;
+  conn_config.buf_size = kAppBufSize;
+  conn_config.buf_shm_key = shm_key;
+  conn_config.use_xrc = (FLAGS_use_xrc == 1);
+  conn_config.is_client = false;
+  conn_config.fst_client_t = false;
+
+  hrd_ctrl_blk_t* cb ;
+
+  cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,0);
+  cb->ahs = new ibv_ah*[kAppNumClientMachines];
+  // Set the buffer to 0 so that we can detect READ completion by polling.
+  memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
+
+  for (size_t i = 0; i < conn_config.num_qps; i++) {
+    char srv_qp_name[kHrdQPNameSize];
+    size_t clt_id = i*clt_num_threads;
+    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, clt_id);
+    hrd_publish_conn_qp_srm(cb,i, srv_qp_name);
+  }
+
+  hrd_qp_attr_t* clt_qp[kAppNumClients];
+  for (size_t i = 0; i < kAppNumClients; i++) {
+    char clt_qp_name[kHrdQPNameSize];
+    sprintf(clt_qp_name, "client-%zu-%zu", i, srv_gid);
+
+    clt_qp[i] = nullptr;
+    while (clt_qp[i] == nullptr) {
+      printf("stuck %s\n",clt_qp_name);
+      clt_qp[i] = hrd_get_published_qp(clt_qp_name);
+      if (clt_qp[i] == nullptr) usleep(20000);
+    }
+
+    
+    if(srv_gid==0 && i%clt_num_threads == 0){
+      printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
+      hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
+      hrd_wait_till_ready(clt_qp_name);
+    }
+  }
+
+  printf("main: Server %zu ready\n", srv_gid);
+
+  struct ibv_send_wr wr, *bad_send_wr;
+  struct ibv_sge sgl;
+  struct ibv_wc wc;
+  size_t rolling_iter = 0;             // For performance measurement
+  size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
+  size_t nb_tx_tot = 0;                // For windowing (for READs only)
+
+  struct timespec run_start, run_end;
+  struct timespec msr_start, msr_end;
+  struct timespec lat_start, lat_end;
+  clock_gettime(CLOCK_REALTIME, &run_start);
+  clock_gettime(CLOCK_REALTIME, &msr_start);
+  std::vector<double> lats;
+
+  auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
+  uint64_t seed = 0xdeadbeef;
+
+  while (1) {
+    if (rolling_iter >= MB(4)) {
+      clock_gettime(CLOCK_REALTIME, &msr_end);
+      double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
+                           (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
+      double tput = rolling_iter / msr_seconds;
+
+      clock_gettime(CLOCK_REALTIME, &run_end);
+      double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
+                           (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
+      if (run_seconds >= FLAGS_run_time) {
+        printf("main: Server %zu exiting.\n", srv_gid);
+        hrd_ctrl_blk_destroy_srm(cb);
+        return;
+      }
+
+      printf(
+          "main: Server %zu: %.2f ops. Total active QPs = %zu. "
+          "Outstanding ops per thread (for READs) = %zu. "
+          "Seconds = %.1f of %zu.\n",
+          srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+          run_seconds, FLAGS_run_time);
+
+      params->tput[srv_gid] = tput;
+      if (srv_gid == 0) {
+        double tot = 0;
+        for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
+        hrd_red_printf("Total tput = %.2f ops\n", tot);
+      }
+
+      rolling_iter = 0;
+      clock_gettime(CLOCK_REALTIME, &msr_start);
+
+      if(FLAGS_test_lat){
+        sort(lats.begin(),lats.end());
+        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
+               lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
+               lats[lats.size() * 99 / 100]);
+        lats.clear();
+      }
+    }
+
+    size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
+
+    // For READs, restrict outstanding ops per-thread to kAppWindowSize
+    if (opcode == IBV_WR_RDMA_READ && nb_tx_tot >= kAppWindowSize) {
+      while (cb->conn_buf[window_i * FLAGS_size] == 0) {
+        // Wait for a window slow to open up
+      }
+      cb->conn_buf[window_i * FLAGS_size] = 0;
+    }
+
+    // Choose the next client to send a packet to
+    size_t cn = hrd_fastrand(&seed) % kAppNumClients;
+    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
+    wr.opcode = opcode;
+    wr.num_sge = 1;
+    wr.next = nullptr;
+    wr.sg_list = &sgl;
+
+    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
+    // if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+    //   // This can happen if a client dies before the server
+    //   int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+    //   if (ret == -1) {
+    //     hrd_ctrl_blk_destroy(cb);
+    //     return;
+    //   }
+    // }
+
+    wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+
+    sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
+    sgl.length = FLAGS_size;
+    sgl.lkey = cb->conn_buf_mr->lkey;
+
+    size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+    wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
+    wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+    wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
+    wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
+    wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
+    nb_tx[qp_cn]++;
+    if(FLAGS_test_lat){
+      clock_gettime(CLOCK_REALTIME, &lat_start);
+    }
+    int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+    rt_assert(ret == 0);
+    rolling_iter++;
+    if(FLAGS_test_lat||true){
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy_srm(cb);
+        return;
+      }
+      clock_gettime(CLOCK_REALTIME, &lat_end);
+      double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
+                          (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
+      lats.push_back(lat_sec);
+      }
+    //printf("%zu\n",rolling_iter);
+  }
+}
+
 void run_client(thread_params_t* params) {
   struct sched_param param;
   int policy;
@@ -317,6 +491,93 @@ void run_client(thread_params_t* params) {
   }
 }
 
+void run_client_srm(thread_params_t* params) {
+  struct sched_param param;
+  int policy;
+  pthread_getschedparam(pthread_self(), &policy, &param);
+
+  int o_pri = param.sched_priority;
+
+  param.sched_priority = sched_get_priority_max(SCHED_FIFO);
+  pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+
+
+  constexpr size_t num_threads = kAppNumClients / kAppNumClientMachines;
+
+  size_t clt_gid = params->id;  // Global ID of this server thread
+  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : clt_gid % 2;
+  int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
+
+  hrd_conn_config_t conn_config;
+  //TODO:xrcd fd
+  conn_config.xrcd_fd = open(SERVER_XRCD_FILE_PATH, O_RDONLY | O_CREAT, S_IRUSR | S_IRGRP);
+  conn_config.use_uc = (FLAGS_use_uc == 1);
+  conn_config.prealloc_buf = nullptr;
+  conn_config.buf_size = kAppBufSize;
+  conn_config.buf_shm_key = shm_key;
+  conn_config.is_client = true;
+  conn_config.fst_client_t = (clt_gid%num_threads==0);
+  conn_config.use_xrc = (FLAGS_use_xrc == 1);
+  conn_config.num_qps = (!FLAGS_use_xrc||conn_config.fst_client_t? kAppNumServers:0);
+  conn_config.rnum_threads = kAppNumServers;
+
+  bool fst_client_t = conn_config.fst_client_t;
+  hrd_ctrl_blk_t* cb;
+  cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,0);
+  // Set to some non-zero value so the server can detect READ completion
+  memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
+
+  for (size_t i = 0; i < kAppNumServers; i++) {
+    char clt_qp_name[kHrdQPNameSize];
+    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+    hrd_publish_conn_qp_srm(cb, i, clt_qp_name);
+  }
+  for (size_t i = 0; i < kAppNumServers; i++) {
+    char srv_qp_name[kHrdQPNameSize];
+    sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
+
+    hrd_qp_attr_t* srv_qp = nullptr;
+    while (srv_qp == nullptr) {
+      srv_qp = hrd_get_published_qp(srv_qp_name);
+      if (srv_qp == nullptr) usleep(20000);
+    }
+
+    printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
+    //hrd_connect_qp_srm(cb, i, srv_qp);
+
+    char clt_qp_name[kHrdQPNameSize];
+    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+    hrd_publish_ready(clt_qp_name);
+  }
+  
+  printf("main: Client %zu READY\n", clt_gid);
+  
+  param.sched_priority = o_pri;
+  pthread_setschedparam(pthread_self(), policy, &param);
+
+  struct timespec run_start, run_end;
+  clock_gettime(CLOCK_REALTIME, &run_start);
+
+  while (true) {
+    printf("main: Client %zu: %d\n", clt_gid, cb->conn_buf[0]);
+
+    clock_gettime(CLOCK_REALTIME, &run_end);
+    double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
+                         (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
+
+    if (run_seconds >= FLAGS_run_time + kAppRunTimeSlack) {
+      printf("main: Client %zu: exiting\n", clt_gid);
+      hrd_ctrl_blk_destroy(cb);
+      return;
+    } else {
+      printf("main: Client %zu: active for %.2f seconds (of %zu + %zu)\n",
+             clt_gid, run_seconds, FLAGS_run_time, kAppRunTimeSlack);
+    }
+
+    sleep(1);
+  }
+}
+
 void set_thread_priority(std::thread &t) {
     // 获取线程的原生句柄
     pthread_t native_handle = t.native_handle();
@@ -365,13 +626,19 @@ int main(int argc, char* argv[]) {
   for (size_t i = 0; i < num_threads; i++) {
     if (FLAGS_is_client == 1) {
       param_arr[i].id = (FLAGS_machine_id * num_threads) + i;
-      thread_arr[i] = std::thread(run_client, &param_arr[i]);
+      if(!FLAGS_use_srm)
+        thread_arr[i] = std::thread(run_client, &param_arr[i]);
+      else
+        thread_arr[i] = std::thread(run_client_srm,&param_arr[i]);
       // if(FLAGS_use_xrc && i==0)
       //   set_thread_priority(thread_arr[i]);
     } else {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
-      thread_arr[i] = std::thread(run_server, &param_arr[i]);
+      if(!FLAGS_use_srm)
+        thread_arr[i] = std::thread(run_server, &param_arr[i]);
+      else 
+        thread_arr[i] = std::thread(run_server_srm,&param_arr[i]);
     }
   }
 
