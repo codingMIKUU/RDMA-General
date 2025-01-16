@@ -26,8 +26,8 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 30;
-static constexpr size_t kAppNumClients = 400;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing

@@ -70,6 +70,8 @@ int get_rdma_attrs(struct ibv_context** ibv_ctx, uint8_t *port_id,union ibv_gid 
     return -1;
 }
 int main() {
+    printf("%d\n",(int)sizeof(struct ibv_send_wr*));
+    printf("%d\n",(int)sizeof(struct ibv_send_wr_q));
     int sockfd, newsockfd;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len;

@@ -990,36 +990,36 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
                                           IBV_ACCESS_REMOTE_READ |
                                           IBV_ACCESS_REMOTE_ATOMIC;
 
-    if (ibv_modify_qp(cb->conn_qp[i], &init_attr,
-                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
-                          IBV_QP_ACCESS_FLAGS)) {
-      fprintf(stderr, "Failed to modify conn QP to INIT\n");
-      exit(-1);
-    }
+    // if (ibv_modify_qp(cb->conn_qp[i], &init_attr,
+    //                   IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
+    //                       IBV_QP_ACCESS_FLAGS)) {
+    //   fprintf(stderr, "Failed to modify conn QP to INIT\n");
+    //   exit(-1);
+    // }
 
-    //To RTR
-    // struct ibv_exp_qp_attr rtr_attr;
-    struct ibv_qp_attr rtr_attr;
-    memset(&rtr_attr, 0, sizeof(rtr_attr));
-    rtr_attr.qp_state = IBV_QPS_RTR;
+    // //To RTR
+    // // struct ibv_exp_qp_attr rtr_attr;
+    // struct ibv_qp_attr rtr_attr;
+    // memset(&rtr_attr, 0, sizeof(rtr_attr));
+    // rtr_attr.qp_state = IBV_QPS_RTR;
 
-    // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rtr_attr, IBV_QP_STATE) ==
-    // 0,
-    rt_assert(ibv_modify_qp(cb->conn_qp[i], &rtr_attr, IBV_QP_STATE) == 0,
-              "Failed to modify dgram QP to RTR");
+    // // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rtr_attr, IBV_QP_STATE) ==
+    // // 0,
+    // rt_assert(ibv_modify_qp(cb->conn_qp[i], &rtr_attr, IBV_QP_STATE) == 0,
+    //           "Failed to modify dgram QP to RTR");
 
-    // RTS state
-    // struct ibv_exp_qp_attr rts_attr;
-    struct ibv_qp_attr rts_attr;
-    memset(&rts_attr, 0, sizeof(rts_attr));
-    rts_attr.qp_state = IBV_QPS_RTS;
-    rts_attr.sq_psn = kHrdDefaultPSN;
+    // // RTS state
+    // // struct ibv_exp_qp_attr rts_attr;
+    // struct ibv_qp_attr rts_attr;
+    // memset(&rts_attr, 0, sizeof(rts_attr));
+    // rts_attr.qp_state = IBV_QPS_RTS;
+    // rts_attr.sq_psn = kHrdDefaultPSN;
 
-    // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rts_attr,
-    //                             IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
-    rt_assert(ibv_modify_qp(cb->conn_qp[i], &rts_attr,
-                            IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
-              "Failed to modify dgram QP to RTS\n");
+    // // rt_assert(ibv_exp_modify_qp(cb->dgram_qp[i], &rts_attr,
+    // //                             IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
+    // rt_assert(ibv_modify_qp(cb->conn_qp[i], &rts_attr,
+    //                         IBV_QP_STATE | IBV_QP_SQ_PSN) == 0,
+    //           "Failed to modify dgram QP to RTS\n");
 
 #else
     assert(cb->use_uc == 0);  // This is for atomics; no atomics on UC
