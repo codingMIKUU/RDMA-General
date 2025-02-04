@@ -93,7 +93,6 @@ void run_server(thread_params_t* params) {
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
-      printf("stuck %s\n",clt_qp_name);
       clt_qp[i] = hrd_get_published_qp(clt_qp_name);
       if (clt_qp[i] == nullptr) usleep(20000);
     }
@@ -264,7 +263,6 @@ void run_server_srm(thread_params_t* params) {
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
-      printf("stuck %s\n",clt_qp_name);
       clt_qp[i] = hrd_get_published_qp(clt_qp_name);
       if (clt_qp[i] == nullptr) usleep(20000);
     }
@@ -366,7 +364,7 @@ void run_server_srm(thread_params_t* params) {
     //   }
     // }
 
-    wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+    //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
     sgl.length = FLAGS_size;

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
-export HRD_REGISTRY_IP="192.168.1.6"
+export HRD_REGISTRY_IP="127.0.0.1"
 
 drop_shm
 
@@ -19,7 +19,7 @@ flags="
 	--size 64 \
 	--run_time 1000 \
 	--do_read 0 \
-	--use_xrc 0 \
+	--use_xrc 1 \
 	--test_lat 0 \
 	--use_srm 1
 "

@@ -70,8 +70,6 @@ int get_rdma_attrs(struct ibv_context** ibv_ctx, uint8_t *port_id,union ibv_gid 
     return -1;
 }
 int main() {
-    printf("%d\n",(int)sizeof(struct ibv_send_wr*));
-    printf("%d\n",(int)sizeof(struct ibv_send_wr_q));
     int sockfd, newsockfd;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len;
@@ -155,6 +153,9 @@ int main() {
             close(newsockfd);
             continue; // 出现错误时继续监听
         }
+        // 打印客户端QP信息
+        printf("Received client QP info:\n");
+        print_qp_info(&remote_qp_info);
         //TODO: create ah to create the tgt qp. what attrs of ah are needed?
         ah_attr.grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
         ah_attr.grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
@@ -162,9 +163,11 @@ int main() {
         ibv_create_ah(pd,&ah_attr,xrcd,&local_qp_info,&remote_qp_info);
 
         
-        // 打印客户端QP信息
-        printf("Received client QP info:\n");
-        print_qp_info(&remote_qp_info);
+
+
+
+        printf("Sending local QP info:\n");
+        print_qp_info(&local_qp_info);
 
         // 发送本地QP信息
         if (send(newsockfd, &local_qp_info, sizeof(local_qp_info), 0) < 0) {

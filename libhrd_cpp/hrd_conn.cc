@@ -968,8 +968,6 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     create_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
     create_attr.pd = cb->pd;
     create_attr.send_cq = cb->conn_cq[i];
-    if(cb->conn_config.is_client)
-      create_attr.srq = cb->srq[i];
     create_attr.cap.max_send_wr = cb->conn_config.sq_depth;
     create_attr.cap.max_send_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
@@ -978,7 +976,8 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
 
     cb->conn_qp[i] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
-
+    if(cb->conn_config.is_client)
+      cb->conn_qp[i]->srq = cb->srq[i];
     struct ibv_qp_attr init_attr;
     memset(&init_attr, 0, sizeof(struct ibv_qp_attr));
     init_attr.qp_state = IBV_QPS_INIT;
@@ -1197,7 +1196,19 @@ void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
   ibv_qp_info local_qp_info;
   local_qp_info.gid.global.interface_id = cb->resolve.gid.global.interface_id;
   local_qp_info.gid.global.subnet_prefix = cb->resolve.gid.global.subnet_prefix;
+  memcpy(local_qp_info.rconn_server,"127.0.0.1",sizeof(local_qp_info.rconn_server));
   memset(&attr,0,sizeof (ibv_ah_attr));
+  attr.is_global = 1;
+  attr.dlid = 0;
+  attr.sl = 0;
+  attr.src_path_bits = 0;
+  attr.port_num = cb->resolve.dev_port_id;
+  attr.grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
+  attr.grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
+  attr.grh.sgid_index = 0;
+  attr.grh.hop_limit = 1;
+  attr.check_xrc = 1;
+
   ibv_xrcd *xrcd = nullptr;
   if(cb->conn_config.is_client)
     xrcd = cb->xrcd;
