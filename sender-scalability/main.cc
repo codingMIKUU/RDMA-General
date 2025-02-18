@@ -185,14 +185,14 @@ void run_server(thread_params_t* params) {
     wr.sg_list = &sgl;
 
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    // if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
-    //   // This can happen if a client dies before the server
-    //   int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
-    //   if (ret == -1) {
-    //     hrd_ctrl_blk_destroy(cb);
-    //     return;
-    //   }
-    // }
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+      // This can happen if a client dies before the server
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy(cb);
+        return;
+      }
+    }
 
     wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
@@ -203,6 +203,8 @@ void run_server(thread_params_t* params) {
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
     wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
     wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+    // wr.wr.rdma.remote_addr = 0;
+    // wr.wr.rdma.rkey = 0;
     wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
     nb_tx[qp_cn]++;
     if(FLAGS_test_lat){
@@ -211,7 +213,7 @@ void run_server(thread_params_t* params) {
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
-    if(FLAGS_test_lat||true){
+    if(FLAGS_test_lat){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
@@ -353,7 +355,7 @@ void run_server_srm(thread_params_t* params) {
     wr.num_sge = 1;
     wr.next = nullptr;
     wr.sg_list = &sgl;
-
+    
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
     // if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
     //   // This can happen if a client dies before the server
@@ -383,7 +385,7 @@ void run_server_srm(thread_params_t* params) {
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
-    if(FLAGS_test_lat||true){
+    if(FLAGS_test_lat){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy_srm(cb);

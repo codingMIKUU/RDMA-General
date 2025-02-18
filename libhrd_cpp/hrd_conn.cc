@@ -1214,6 +1214,10 @@ void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
     xrcd = cb->xrcd;
 
   cb->ahs[i] = ibv_create_ah(cb->pd,&attr,xrcd,&local_qp_info,NULL);
+  if(cb->ahs[i]==nullptr){
+    fprintf(stderr,"Failed to create ah\n");
+    exit(-1);
+  }
   return;
 }
 void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
