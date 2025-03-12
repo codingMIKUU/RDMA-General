@@ -2,6 +2,7 @@
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
 export HRD_REGISTRY_IP="127.0.0.1"
+# export HRD_REGISTRY_IP="192.168.1.5"
 
 drop_shm
 

@@ -742,10 +742,10 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
     create_attr.cap.max_send_sge = 1;
     create_attr.cap.max_recv_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
-
+    printf("???????\n");
     cb->conn_qp[i] = ibv_create_qp(cb->pd, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
-
+    printf("sjaksjaksjksja\n");
     struct ibv_qp_attr init_attr;
     memset(&init_attr, 0, sizeof(struct ibv_qp_attr));
     init_attr.qp_state = IBV_QPS_INIT;
@@ -1190,13 +1190,14 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   return;
 }
 
-void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
+int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
                     hrd_qp_attr_t* remote_qp_attr) {
+  printf("Connect qp srm\n");
   ibv_ah_attr attr;
   ibv_qp_info local_qp_info;
   local_qp_info.gid.global.interface_id = cb->resolve.gid.global.interface_id;
   local_qp_info.gid.global.subnet_prefix = cb->resolve.gid.global.subnet_prefix;
-  memcpy(local_qp_info.rconn_server,"127.0.0.1",sizeof(local_qp_info.rconn_server));
+  // memcpy(local_qp_info.rconn_server,"127.0.0.1",sizeof(local_qp_info.rconn_server));
   memset(&attr,0,sizeof (ibv_ah_attr));
   attr.is_global = 1;
   attr.dlid = 0;
@@ -1215,10 +1216,11 @@ void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
 
   cb->ahs[i] = ibv_create_ah(cb->pd,&attr,xrcd,&local_qp_info,NULL);
   if(cb->ahs[i]==nullptr){
-    fprintf(stderr,"Failed to create ah\n");
-    exit(-1);
+    fprintf(stderr,"Failed to create ah in RDMA-bench\n");
+    return -1;
+    
   }
-  return;
+  return 0;
 }
 void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
   assert(n < cb->conn_config.num_qps || cb->conn_config.use_xrc && n<cb->conn_config.rnum_threads);
@@ -1232,6 +1234,7 @@ void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) 
   strcpy(qp_attr.name, qp_name);
   qp_attr.lid = cb->resolve.port_lid;
   qp_attr.qpn = cb->conn_qp[n]->qp_num;
+  printf("应用层qpn:%d\n",qp_attr.qpn);
   if (kRoCE) qp_attr.gid = cb->resolve.gid;
 
   qp_attr.buf_addr = reinterpret_cast<uint64_t>(cb->conn_buf);

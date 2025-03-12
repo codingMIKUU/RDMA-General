@@ -1,0 +1,37 @@
+[33mb0da495[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/xrc[m[33m, [m[1;32mxrc[m[33m)[m HEAD@{0}: rebase finished: refs/heads/master onto b0da4953fdc90ed726b554503c064e58f4b90b4d
+[33mb0da495[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/xrc[m[33m, [m[1;32mxrc[m[33m)[m HEAD@{1}: rebase: checkout xrc
+[33m4f23926[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32msrm[m[33m)[m HEAD@{2}: pull origin master: Fast-forward
+[33m3cd69f9[m HEAD@{3}: checkout: moving from xrc to master
+[33mb0da495[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/xrc[m[33m, [m[1;32mxrc[m[33m)[m HEAD@{4}: checkout: moving from xrc to xrc
+[33mb0da495[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/xrc[m[33m, [m[1;32mxrc[m[33m)[m HEAD@{5}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{6}: checkout: moving from xrc to master
+[33mb0da495[m[33m ([m[1;36mHEAD -> [m[1;32mmaster[m[33m, [m[1;31morigin/xrc[m[33m, [m[1;32mxrc[m[33m)[m HEAD@{7}: commit: srm
+[33m60a7224[m HEAD@{8}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{9}: checkout: moving from xrc to master
+[33m60a7224[m HEAD@{10}: commit: srm
+[33m8f37161[m HEAD@{11}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{12}: reset: moving to HEAD
+[33m3cd69f9[m HEAD@{13}: checkout: moving from xrc to master
+[33m8f37161[m HEAD@{14}: commit: srm
+[33m4918b66[m HEAD@{15}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{16}: checkout: moving from xrc to master
+[33m4918b66[m HEAD@{17}: commit: srm
+[33mff951fa[m HEAD@{18}: commit: fix thread logic
+[33m3037285[m HEAD@{19}: commit: fix xrc lat test logic
+[33m67fa8af[m HEAD@{20}: commit: add thread priority
+[33m0e46845[m HEAD@{21}: commit: test
+[33mcae166e[m HEAD@{22}: rebase finished: returning to refs/heads/xrc
+[33mcae166e[m HEAD@{23}: rebase: add latency test
+[33m55d830b[m HEAD@{24}: rebase: add latency test
+[33m4f23926[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32msrm[m[33m)[m HEAD@{25}: rebase: checkout origin/master
+[33m98d7336[m HEAD@{26}: commit: add latency test
+[33m63ece85[m HEAD@{27}: commit: add latency test
+[33ma05900b[m HEAD@{28}: commit: finish xrc multiple
+[33mf734e9b[m HEAD@{29}: commit: finish xrc
+[33m0c2a232[m HEAD@{30}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{31}: checkout: moving from xrc to master
+[33m0c2a232[m HEAD@{32}: commit: first change
+[33m5bd8a32[m HEAD@{33}: rebase finished: refs/heads/xrc onto 5bd8a324b5c60c77a6a6026164f3c3748c7227e9
+[33m5bd8a32[m HEAD@{34}: rebase: checkout origin/xrc
+[33m3cd69f9[m HEAD@{35}: checkout: moving from master to xrc
+[33m3cd69f9[m HEAD@{36}: clone: from git@github.com:codingMIKUU/RDMA-General.git

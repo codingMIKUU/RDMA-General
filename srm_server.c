@@ -8,13 +8,21 @@
 #include <fcntl.h>
 #include <stdlib.h>
 static const char* XRCD_FILE_PATH = "/tmp/server_xrcd";
+#ifndef htonll
+#define htonll(x) ((1==htonl(1)) ? (x) : ((uint64_t)htonl((x) & 0xFFFFFFFF) << 32) | htonl((x) >> 32))
+#endif
 
+#ifndef ntohll
+#define ntohll(x) ((1==ntohl(1)) ? (x) : ((uint64_t)ntohl((x) & 0xFFFFFFFF) << 32) | ntohl((x) >> 32))
+#endif
 void print_qp_info(struct ibv_qp_info *info) {
     printf("QP Number: %u\n", info->qpn);
-    printf("GID: ");
-    for (int i = 0; i < 16; ++i) {
-        printf("%02x", info->gid.raw[i]);
-    }
+    // printf("GID: ");
+    // for (int i = 0; i < 16; ++i) {
+    //     printf("%02x", info->gid.raw[i]);
+    // }
+    printf("interface id: 0x%llx\n", info->gid.global.interface_id);
+    printf("subnet prefix: 0x%llx\n", info->gid.global.subnet_prefix);
     printf("\n");
 }
 int get_rdma_attrs(struct ibv_context** ibv_ctx, uint8_t *port_id,union ibv_gid *gid){
@@ -463,7 +471,7 @@ void test_xrc_ini_and_kernel_tgt(struct ibv_pd *pd,union ibv_gid *gid,struct ibv
     }
 }
 int main() {
-    const int port_num = 1234;
+    const int port_num = 12345;
     int sockfd, newsockfd;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_len;
@@ -483,7 +491,7 @@ int main() {
     ah_attr.grh.sgid_index = 0;
     ah_attr.grh.hop_limit = 1;
     int ret = get_rdma_attrs(&ibv_ctx,&ah_attr.port_num,&local_qp_info.gid);
-
+    char buffer[256];
     if(ret){
         return 1;
     }
@@ -512,6 +520,12 @@ int main() {
         perror("Socket creation failed");
         return 1;
     }
+    int opt = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
+        perror("setsockopt(SO_REUSEADDR) failed");
+        close(sockfd);
+        return -1;
+    }
 
     // 设置服务器地址
     server_addr.sin_family = AF_INET;
@@ -533,7 +547,7 @@ int main() {
     }
 
     printf("Server listening on port %d\n",port_num);
-
+    uint32_t local_qpn = 0;
     // 进入死循环持续监听连接
     while (1) {
         // 接受客户端连接
@@ -543,24 +557,45 @@ int main() {
             continue; // 出现错误时继续监听
         }
 
-        // 接收客户端QP信息
-        if ((ret = recv(newsockfd, &remote_qp_info, sizeof(remote_qp_info), 0))<=0) {
-            if(ret<0)
-                perror("Receive failed");
+        // // 接收客户端字符串
+        // char recv_buf[100];
+        // // memset(recv_buf, 0, sizeof(recv_buf)); 
+        // size_t ret=recv(newsockfd, recv_buf, sizeof(recv_buf), 0);
+        // if (ret < 0) {
+        //     perror("Receive failed");
+        //     close(newsockfd);
+        //     close(sockfd);
+        //     return;
+        // }
+
+        // // 打印接收到的字符串
+        // printf("Received string: %s, buff size:%d, size%d\n", recv_buf,sizeof(recv_buf),ret);
+
+        // // 发送字符串
+        // char send_buf[] = "tyys";
+        // if (send(newsockfd, send_buf, sizeof(send_buf), 0) < 0) {
+        //     perror("Send failed");
+        //     close(newsockfd);
+        //     close(sockfd);
+        //     return;
+        // }
+        // printf("Sent string: %s,size%d \n", send_buf,sizeof(send_buf));
+
+        //接收客户端QP信息
+        printf("remote_qp size:%zu\n",sizeof(remote_qp_info));
+        int ret = recv(newsockfd, &remote_qp_info, sizeof(remote_qp_info),0);
+        if(ret<=0)
+        {       
+            perror("Receive failed");
             printf("Receive failed,recv size %d\n",ret);
             close(newsockfd);
             continue; // 出现错误时继续监听
         }
-
-        // char str[5]={0};
-        // if (recv(newsockfd, str, 5, 0) < 0) {
-        //     perror("Receive failed");
-        //     close(newsockfd);
-        //     continue; // 出现错误时继续监听
-        // }
-        // printf("%s\n",str);
         // 打印客户端QP信息
-        printf("Received client QP info:\n");
+        // remote_qp_info.qpn = ntohl(remote_qp_info.qpn);
+        // remote_qp_info.gid.global.subnet_prefix = ntohll(remote_qp_info.gid.global.subnet_prefix);
+        // remote_qp_info.gid.global.interface_id = ntohll(remote_qp_info.gid.global.interface_id);
+        printf("Received client QP info:,ret:%d\n",ret);
         print_qp_info(&remote_qp_info);
        
         //TODO: create ah to create the tgt qp. what attrs of ah are needed?
@@ -574,16 +609,21 @@ int main() {
         }
         //local_qp_info.qpn =  ah->srmc_flags;
 
-
         printf("Sending local QP info:\n");
         print_qp_info(&local_qp_info);
-
+        // local_qp_info.qpn = htonl(local_qp_info.qpn);
+        // local_qp_info.gid.global.interface_id = htonll(local_qp_info.gid.global.interface_id);  
+        // local_qp_info.gid.global.subnet_prefix = htonll(local_qp_info.gid.global.subnet_prefix);
+        ret=send(newsockfd, &local_qp_info, sizeof(local_qp_info),0);
         // 发送本地QP信息
-        if (send(newsockfd, &local_qp_info, sizeof(local_qp_info), 0) < 0) {
+        if (ret < 0) {
             perror("Send failed");
             close(newsockfd);
             continue; // 出现错误时继续监听
         }
+        printf("Sending QP OK\n");
+
+        
 
         // 关闭连接
         close(newsockfd);

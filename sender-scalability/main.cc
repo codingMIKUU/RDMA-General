@@ -52,6 +52,16 @@ DEFINE_uint64(use_xrc,0,"Use XRC");
 DEFINE_uint64(test_lat,0,"Test latency");
 DEFINE_uint64(use_srm,0,"Test SRM QPs");
 
+void print_qp_info(struct hrd_qp_attr_t *info) {
+  printf("QP Number: %u\n", info->qpn);
+  printf("GID: ");
+  for (int i = 0; i < 16; ++i) {
+      printf("%02x", info->gid.raw[i]);
+  }
+  printf("\n");
+  printf("r_key: %u\n", info->rkey);
+  printf("addr: %lu\n", info->buf_addr);
+}
 
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
@@ -103,7 +113,9 @@ void run_server(thread_params_t* params) {
       hrd_connect_qp(cb, i, clt_qp[i]);
       hrd_wait_till_ready(clt_qp_name);
     }
+    print_qp_info(clt_qp[i]);
   }
+
 
   printf("main: Server %zu ready\n", srv_gid);
 
@@ -249,7 +261,7 @@ void run_server_srm(thread_params_t* params) {
   cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,0);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 0 so that we can detect READ completion by polling.
-  memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
+  memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
   for (size_t i = 0; i < conn_config.num_qps; i++) {
     char srv_qp_name[kHrdQPNameSize];
@@ -272,10 +284,13 @@ void run_server_srm(thread_params_t* params) {
     
     if(srv_gid==0 && i%clt_num_threads == 0){
       printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-      hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
+      int ret=hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
+      if(ret==-1) {hrd_ctrl_blk_destroy_srm(cb);printf("srm failed creating,删用户态资源\n");return;}
       hrd_wait_till_ready(clt_qp_name);
     }
+    printf("服务端lkey：%d，收到的rkey：%d\n",cb->conn_buf_mr->lkey,clt_qp[i]->rkey);
   }
+  
 
   printf("main: Server %zu ready\n", srv_gid);
 
@@ -357,34 +372,40 @@ void run_server_srm(thread_params_t* params) {
     wr.sg_list = &sgl;
     
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    // if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
-    //   // This can happen if a client dies before the server
-    //   int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
-    //   if (ret == -1) {
-    //     hrd_ctrl_blk_destroy(cb);
-    //     return;
-    //   }
-    // }
-
-    //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+      printf("ready to poll cq\n");
+      // This can happen if a client dies before the server
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy(cb);
+        return;
+      }
+      printf("complete to poll cq\n");
+    }
+ 
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
     sgl.length = FLAGS_size;
     sgl.lkey = cb->conn_buf_mr->lkey;
 
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
-    wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
+    wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
+    printf("发送端的数据缓存区地址: %p\n", sgl.addr);
+    printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
     wr.wr.rdma.rkey = clt_qp[cn]->rkey;
     wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
     wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
     wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
+    printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
     nb_tx[qp_cn]++;
     if(FLAGS_test_lat){
       clock_gettime(CLOCK_REALTIME, &lat_start);
     }
+    printf("ready to post send, rolling_iter%d\n",rolling_iter);
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
+    printf("finish to post send, rolling_iter%d\n",rolling_iter);
     if(FLAGS_test_lat){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
@@ -401,6 +422,7 @@ void run_server_srm(thread_params_t* params) {
 }
 
 void run_client(thread_params_t* params) {
+  printf("run_client\n");
   struct sched_param param;
   int policy;
   pthread_getschedparam(pthread_self(), &policy, &param);
@@ -461,6 +483,7 @@ void run_client(thread_params_t* params) {
       char clt_qp_name[kHrdQPNameSize];
       sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
       hrd_publish_ready(clt_qp_name);
+      print_qp_info(srv_qp);
     }
   }
   printf("main: Client %zu READY\n", clt_gid);
@@ -492,6 +515,7 @@ void run_client(thread_params_t* params) {
 }
 
 void run_client_srm(thread_params_t* params) {
+  printf("run_client_srm\n");
   struct sched_param param;
   int policy;
   pthread_getschedparam(pthread_self(), &policy, &param);
@@ -525,7 +549,7 @@ void run_client_srm(thread_params_t* params) {
   hrd_ctrl_blk_t* cb;
   cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,0);
   // Set to some non-zero value so the server can detect READ completion
-  memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
+  memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
   for (size_t i = 0; i < kAppNumServers; i++) {
     char clt_qp_name[kHrdQPNameSize];
@@ -541,6 +565,7 @@ void run_client_srm(thread_params_t* params) {
       srv_qp = hrd_get_published_qp(srv_qp_name);
       if (srv_qp == nullptr) usleep(20000);
     }
+    printf("客户端lkey：%d，收到的rkey：%d\n",cb->conn_buf_mr->lkey,srv_qp->rkey);
 
     printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
     //hrd_connect_qp_srm(cb, i, srv_qp);
@@ -557,9 +582,20 @@ void run_client_srm(thread_params_t* params) {
 
   struct timespec run_start, run_end;
   clock_gettime(CLOCK_REALTIME, &run_start);
-
+  printf("客户端缓存区地址: %p\n", cb->conn_buf);
   while (true) {
     printf("main: Client %zu: %d\n", clt_gid, cb->conn_buf[0]);
+    printf("cb->conn_buf\n");
+    for (size_t i = 0; i < kAppBufSize; ++i) {
+      if(cb->conn_buf[i]){
+        printf("写入成功\n");
+        break;
+      }
+      // printf("%02x ", cb->conn_buf[i]);
+      // if ((i + 1) % 16 == 0) {
+      //     printf("\n");
+      // }
+    }
 
     clock_gettime(CLOCK_REALTIME, &run_end);
     double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
@@ -573,6 +609,7 @@ void run_client_srm(thread_params_t* params) {
       printf("main: Client %zu: active for %.2f seconds (of %zu + %zu)\n",
              clt_gid, run_seconds, FLAGS_run_time, kAppRunTimeSlack);
     }
+
 
     sleep(1);
   }

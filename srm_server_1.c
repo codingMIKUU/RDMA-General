@@ -320,9 +320,9 @@ void test_xrc_ini(struct ibv_pd *pd,union ibv_gid *gid,struct ibv_xrcd *xrcd,str
     wr.send_flags = IBV_SEND_SIGNALED;
     
 
-    sgl.addr = (uint64_t)buf;
+    sgl.addr = remote_qp_info.addr;
     sgl.length = 100;
-    sgl.lkey = mr->lkey;
+    sgl.lkey = remote_qp_info.rkey;
     // sgl.lkey = 1111;
 
     // wr.wr.rdma.remote_addr = (uint64_t)buf2;
@@ -377,6 +377,13 @@ int main() {
         return 1;
     }
     pd = ibv_alloc_pd(ibv_ctx);
+    int dup_fd = dup(ibv_ctx->cmd_fd);
+    if(dup_fd<0){
+        perror("dup failed");
+        return 1;
+    }
+    printf("server ib_ctx cmd fd is %d\n",dup_fd);
+    printf("server pd handle is %d\n",pd->handle);
     if(pd == NULL){
         printf("Failed to allocate pd\n");
         return 1;

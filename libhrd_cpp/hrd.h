@@ -204,7 +204,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb);
 void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t conn_qp_idx,
                     hrd_qp_attr_t* remote_qp_attr);
 
-void hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
+int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
                     hrd_qp_attr_t* remote_qp_attr);
 
 // Post 1 RECV for this queue pair for this buffer. Low performance.

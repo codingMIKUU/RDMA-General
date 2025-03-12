@@ -295,7 +295,11 @@ int main() {
     if(ret){
         return 1;
     }
-    pd = ibv_alloc_pd(ibv_ctx);
+    //pd = ibv_alloc_pd(ibv_ctx);
+    int pd_handle;
+    printf("请输入 pd handle:");
+    scanf("%d",&pd_handle);
+    pd = ibv_import_pd(ibv_ctx,pd_handle);
     if(pd == NULL){
         printf("Failed to allocate pd\n");
         return 1;
