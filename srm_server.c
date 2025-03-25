@@ -138,8 +138,6 @@ void test_xrc_ini(struct ibv_pd *pd,union ibv_gid *gid,struct ibv_xrcd *xrcd,str
     // ah_attr->grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
     //struct ibv_ah *ah = ibv_create_ah(pd,ah_attr,xrcd,&local_qp_info,&remote_qp_info);
     //struct ibv_qp *tgt_qp = create_xrc_tgt(pd,xrcd,&local_qp_info,&remote_qp_info);
-    printf("ini qp qp_num:%d\n",qp->qp_num);
-    scanf("%d",&remote_qp_info.qpn);
     //modify qp
     memset(&conn_attr,0,sizeof conn_attr);
     conn_attr.qp_state = IBV_QPS_INIT;
@@ -591,6 +589,8 @@ int main() {
             close(newsockfd);
             continue; // 出现错误时继续监听
         }
+
+        
         // 打印客户端QP信息
         // remote_qp_info.qpn = ntohl(remote_qp_info.qpn);
         // remote_qp_info.gid.global.subnet_prefix = ntohll(remote_qp_info.gid.global.subnet_prefix);
@@ -601,13 +601,14 @@ int main() {
         //TODO: create ah to create the tgt qp. what attrs of ah are needed?
         ah_attr.grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
         ah_attr.grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
-        // ah_attr.dqpn = remote_qp_info.qpn;
-        
+        ah_attr.dqpn = remote_qp_info.qpn;
         struct ibv_ah *ah = ibv_create_ah(pd,&ah_attr,xrcd,&local_qp_info,&remote_qp_info);
         if(ah == NULL){
             printf("Failed to create AH\n");
+            close(newsockfd);
+            goto err;
         }
-        //local_qp_info.qpn =  ah->srmc_flags;
+        local_qp_info.qpn =  ah->srmc_flags;
 
         printf("Sending local QP info:\n");
         print_qp_info(&local_qp_info);
@@ -623,13 +624,50 @@ int main() {
         }
         printf("Sending QP OK\n");
 
-        
+        // char *buf = (char*)malloc(100);
+        // memset(buf,0,100);
+        // struct ibv_mr *mr = ibv_reg_mr(pd,buf,100,IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE
+        //                  | IBV_ACCESS_REMOTE_READ | IBV_ACCESS_REMOTE_ATOMIC);
+        // struct ibv_send_wr wr, *bad_wr = NULL;
+        // memset(&wr, 0, sizeof wr);
+        // struct ibv_sge sgl;
+        // sgl.addr = (uint64_t)buf;
+        // sgl.length = 100;
+        // sgl.lkey = mr->lkey;
+
+
+        // wr.opcode = IBV_WR_RDMA_WRITE;
+        // wr.num_sge = 1;
+        // wr.next = NULL;
+        // wr.sg_list = &sgl;
+        // wr.send_flags = IBV_SEND_SIGNALED;
+        // wr.wr.rdma.remote_addr = 5;
+        // wr.wr.rdma.rkey = 6;
+        // if(ibv_post_send(local_qp_info.qp, &wr, &bad_wr)){
+        //     printf("Failed to post send\n");
+        //     return 1;
+        // }
+        // printf("post send success\n");
+        // struct ibv_wc wc;
+        // while(1){
+            
+        //     ret = ibv_poll_cq(local_qp_info.qp->send_cq, 1, &wc);
+        //     if(ret){
+        //         break;
+        //     }
+        //     if(ret==0){
+        //         continue;
+        //     }
+        // }
+        // printf("ret:%d, status:%d\n",ret,wc.status);
+
 
         // 关闭连接
         close(newsockfd);
     }
 
     // 关闭服务器套接字（实际代码中不会到达这里）
+err:
     close(sockfd);
     return 0;
 }
