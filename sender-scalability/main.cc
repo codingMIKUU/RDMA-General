@@ -206,7 +206,7 @@ void run_server(thread_params_t* params) {
       }
     }
 
-    wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+    //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
     sgl.length = FLAGS_size;
@@ -260,7 +260,7 @@ void run_server_srm(thread_params_t* params) {
 
   cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,0);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
-  // Set the buffer to 0 so that we can detect READ completion by polling.
+  // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
   for (size_t i = 0; i < conn_config.num_qps; i++) {
@@ -377,7 +377,7 @@ void run_server_srm(thread_params_t* params) {
       // This can happen if a client dies before the server
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
-        hrd_ctrl_blk_destroy(cb);
+        hrd_ctrl_blk_destroy_srm(cb);
         return;
       }
       printf("complete to poll cq\n");
@@ -541,14 +541,13 @@ void run_client_srm(thread_params_t* params) {
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid%num_threads==0);
-  conn_config.use_xrc = (FLAGS_use_xrc == 1);
-  conn_config.num_qps = (!FLAGS_use_xrc||conn_config.fst_client_t? kAppNumServers:0);
+  conn_config.num_qps = 1;
   conn_config.rnum_threads = kAppNumServers;
 
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
   cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,0);
-  // Set to some non-zero value so the server can detect READ completion
+  // Set to zero value so the server can detect WRITE completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
   for (size_t i = 0; i < kAppNumServers; i++) {
@@ -582,20 +581,8 @@ void run_client_srm(thread_params_t* params) {
 
   struct timespec run_start, run_end;
   clock_gettime(CLOCK_REALTIME, &run_start);
-  printf("客户端缓存区地址: %p\n", cb->conn_buf);
   while (true) {
     printf("main: Client %zu: %d\n", clt_gid, cb->conn_buf[0]);
-    printf("cb->conn_buf\n");
-    for (size_t i = 0; i < kAppBufSize; ++i) {
-      if(cb->conn_buf[i]){
-        printf("写入成功\n");
-        break;
-      }
-      // printf("%02x ", cb->conn_buf[i]);
-      // if ((i + 1) % 16 == 0) {
-      //     printf("\n");
-      // }
-    }
 
     clock_gettime(CLOCK_REALTIME, &run_end);
     double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
@@ -603,7 +590,7 @@ void run_client_srm(thread_params_t* params) {
 
     if (run_seconds >= FLAGS_run_time + kAppRunTimeSlack) {
       printf("main: Client %zu: exiting\n", clt_gid);
-      hrd_ctrl_blk_destroy(cb);
+      hrd_ctrl_blk_destroy_srm(cb);
       return;
     } else {
       printf("main: Client %zu: active for %.2f seconds (of %zu + %zu)\n",

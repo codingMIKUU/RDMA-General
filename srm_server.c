@@ -191,9 +191,9 @@ void test_xrc_ini(struct ibv_pd *pd,union ibv_gid *gid,struct ibv_xrcd *xrcd,str
 
     int rts_flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
 
-    conn_attr.timeout = 14;
-    conn_attr.retry_cnt = 7;
-    conn_attr.rnr_retry = 7;
+    conn_attr.timeout = 14;//14
+    conn_attr.retry_cnt = 7;//7
+    conn_attr.rnr_retry = 7;//7
     conn_attr.max_rd_atomic = max_rd_atomic;
     conn_attr.max_dest_rd_atomic = max_rd_atomic;
     rts_flags |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
