@@ -7,7 +7,7 @@ drop_shm
 
 blue "Reset server QP registry"
 sudo pkill memcached
-memcached -l 0.0.0.0 1>/dev/null 2>/dev/null &
+memcached -u nobody -l 192.168.1.5 1>/dev/null 2>/dev/null &
 sleep 1
 
 blue "Starting server"
@@ -19,9 +19,9 @@ flags="
 	--size 64 \
 	--run_time 1000 \
 	--do_read 0 \
-	--use_xrc 1 \
+	--use_xrc 0 \
 	--test_lat 0 \
-	--use_srm 1
+	--use_srm 0
 "
 
 # Check for non-gdb mode

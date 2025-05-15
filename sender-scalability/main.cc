@@ -36,6 +36,10 @@ static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 // We don't use postlist, so we don't need a postlist check
 static_assert(kHrdSQDepth >= 2 * kAppUnsigBatch, "");  // Queue capacity check
 
+
+hrd_ctrl_blk_t *srm_cb;
+ibv_pd *srm_pd;
+
 struct thread_params_t {
   size_t id;
   double* tput;
@@ -240,6 +244,7 @@ void run_server(thread_params_t* params) {
   }
 }
 
+
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -258,15 +263,14 @@ void run_server_srm(thread_params_t* params) {
 
   hrd_ctrl_blk_t* cb ;
 
-  cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,0);
+  cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,conn_config.is_client,srm_cb,srm_pd);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
-  for (size_t i = 0; i < conn_config.num_qps; i++) {
+  for (size_t i = 0; i < kAppNumClients; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    size_t clt_id = i*clt_num_threads;
-    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, clt_id);
+    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
     hrd_publish_conn_qp_srm(cb,i, srv_qp_name);
   }
 
@@ -282,7 +286,7 @@ void run_server_srm(thread_params_t* params) {
     }
 
     
-    if(srv_gid==0 && i%clt_num_threads == 0){
+    if(i%clt_num_threads == 0){
       printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
       int ret=hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
       if(ret==-1) {hrd_ctrl_blk_destroy_srm(cb);printf("srm failed creating,删用户态资源\n");return;}
@@ -365,7 +369,7 @@ void run_server_srm(thread_params_t* params) {
 
     // Choose the next client to send a packet to
     size_t cn = hrd_fastrand(&seed) % kAppNumClients;
-    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
+    size_t qp_cn = FLAGS_use_srm?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.next = nullptr;
@@ -373,14 +377,14 @@ void run_server_srm(thread_params_t* params) {
     
     wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
     if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
-      printf("ready to poll cq\n");
+      //printf("ready to poll cq\n");
       // This can happen if a client dies before the server
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy_srm(cb);
         return;
       }
-      printf("complete to poll cq\n");
+      //printf("complete to poll cq\n");
     }
  
 
@@ -390,22 +394,22 @@ void run_server_srm(thread_params_t* params) {
 
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
     wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
-    printf("发送端的数据缓存区地址: %p\n", sgl.addr);
-    printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
+    // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
+    // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
     wr.wr.rdma.rkey = clt_qp[cn]->rkey;
     wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
     wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
     wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
-    printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
+    // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
     nb_tx[qp_cn]++;
     if(FLAGS_test_lat){
       clock_gettime(CLOCK_REALTIME, &lat_start);
     }
-    printf("ready to post send, rolling_iter%d\n",rolling_iter);
+    //printf("ready to post send, rolling_iter%d\n",rolling_iter);
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
-    printf("finish to post send, rolling_iter%d\n",rolling_iter);
+    //printf("finish to post send, rolling_iter%d\n",rolling_iter);
     if(FLAGS_test_lat){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
@@ -541,12 +545,13 @@ void run_client_srm(thread_params_t* params) {
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid%num_threads==0);
-  conn_config.num_qps = 1;
+  conn_config.num_qps = 0;
   conn_config.rnum_threads = kAppNumServers;
 
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
-  cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,0);
+  cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,conn_config.is_client,
+    nullptr,nullptr);
   // Set to zero value so the server can detect WRITE completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
@@ -647,6 +652,14 @@ int main(int argc, char* argv[]) {
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
   double tput[num_threads];
+
+
+  if(FLAGS_use_srm){
+    srm_cb = new hrd_ctrl_blk_t();
+    memset(srm_cb,0,sizeof(hrd_ctrl_blk_t));
+    hrd_resolve_port_index(srm_cb,0);
+    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+  }
   for (size_t i = 0; i < num_threads; i++) {
     if (FLAGS_is_client == 1) {
       param_arr[i].id = (FLAGS_machine_id * num_threads) + i;
@@ -661,11 +674,16 @@ int main(int argc, char* argv[]) {
       param_arr[i].tput = tput;
       if(!FLAGS_use_srm)
         thread_arr[i] = std::thread(run_server, &param_arr[i]);
-      else 
+      else {
         thread_arr[i] = std::thread(run_server_srm,&param_arr[i]);
+      }
     }
   }
 
   for (auto& t : thread_arr) t.join();
+  if(FLAGS_use_srm){
+    ibv_dealloc_pd(srm_pd);
+    ibv_close_device(srm_cb->resolve.ib_ctx);
+  }
   return 0;
 }

@@ -186,7 +186,7 @@ hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index,
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
                                          hrd_dgram_config_t* dgram_config,
-                                         bool fst_clt_t);
+                                         bool is_clt,hrd_ctrl_blk_t *srm_cb,ibv_pd *srm_pd);
 
 int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb);
 
