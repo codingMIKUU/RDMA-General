@@ -2,7 +2,7 @@
 source $(dirname $0)/../scripts/utils.sh
 source $(dirname $0)/../scripts/mlx_env.sh
 export HRD_REGISTRY_IP="192.168.1.5"
-
+export MLX5_SINGLE_THREADED=0
 drop_shm
 
 blue "Reset server QP registry"
@@ -16,12 +16,12 @@ flags="
 	--dual_port 0 \
   --use_uc 0 \
 	--is_client 0 \
-	--size 64 \
+	--size 4096 \
 	--run_time 1000 \
 	--do_read 0 \
 	--use_xrc 0 \
 	--test_lat 0 \
-	--use_srm 0
+	--use_srm 1
 "
 
 # Check for non-gdb mode
