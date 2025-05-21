@@ -6,8 +6,8 @@ function blue() {
 }
 
 export HRD_REGISTRY_IP="10.113.1.47"
-export MLX5_SINGLE_THREADED=1
-export MLX4_SINGLE_THREADED=1
+export MLX5_SINGLE_THREADED=0
+export MLX4_SINGLE_THREADED=0
 
 blue "Removing SHM key 24 (request region hugepages)"
 sudo ipcrm -M 24

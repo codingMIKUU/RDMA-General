@@ -27,9 +27,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 1;
-static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;
+static constexpr size_t kAppUnsigBatch = 64;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -300,7 +300,7 @@ void run_server_srm(thread_params_t* params) {
 
   struct ibv_send_wr wr, *bad_send_wr;
   struct ibv_sge sgl;
-  struct ibv_wc wc[kAppUnsigBatch];
+  struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
   size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
@@ -360,6 +360,7 @@ void run_server_srm(thread_params_t* params) {
     }
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
+    
 
     // // For READs, restrict outstanding ops per-thread to kAppWindowSize
     // if (opcode == IBV_WR_RDMA_READ && nb_tx_tot >= kAppWindowSize) {
@@ -372,71 +373,64 @@ void run_server_srm(thread_params_t* params) {
     // Choose the next client to send a packet to
     size_t cn = hrd_fastrand(&seed) % kAppNumClients;
     size_t qp_cn = cn/clt_num_threads;
-    while(kAppUnsigBatch-nb_tx[qp_cn]){
-      wr.opcode = opcode;
-      wr.num_sge = 1;
-      wr.next = nullptr;
-      wr.sg_list = &sgl;
-      
-      //wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-      wr.send_flags = IBV_SEND_SIGNALED;
 
-
-      sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-      sgl.length = FLAGS_size;
-      sgl.lkey = cb->conn_buf_mr->lkey;
-
-      size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
-      // size_t remote_offset = rolling_iter;
-      wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
-      // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
-      // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-      wr.wr.rdma.rkey = clt_qp[cn]->rkey;
-      wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
-      wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
-      wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
-      // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
-      nb_tx[qp_cn]++;
-      if(FLAGS_test_lat){
-        clock_gettime(CLOCK_REALTIME, &lat_start);
-      }
-  
-      //printf("ready to post send, rolling_iter%d\n",rolling_iter);
-  
-
-      int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
-      rt_assert(ret == 0);
-      rolling_iter++;
-      if(FLAGS_test_lat){
-        int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, wc);
-        if (ret == -1) {
-          hrd_ctrl_blk_destroy_srm(cb);
-          return;
-        }
-        clock_gettime(CLOCK_REALTIME, &lat_end);
-        double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
-                            (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
-        lats.push_back(lat_sec);
-      }
-    }
-    //printf("finish to post send, rolling_iter%d\n",rolling_iter);
-
-    if (!FLAGS_test_lat) {
-      int ret;
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
       //printf("ready to poll cq\n");
       // This can happen if a client dies before the server
-      while(nb_tx[qp_cn]){
-        while(!(ret = ibv_poll_cq(cb->conn_cq[qp_cn],nb_tx[qp_cn],wc))){
-          ;
-        }
-        nb_tx[qp_cn] -= ret;
-      }
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy_srm(cb);
         return;
       }
       //printf("complete to poll cq\n");
     }
+    wr.opcode = opcode;
+    wr.num_sge = 1;
+    wr.next = nullptr;
+    wr.sg_list = &sgl;
+    
+    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
+
+
+    sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
+    sgl.length = FLAGS_size;
+    sgl.lkey = cb->conn_buf_mr->lkey;
+
+    size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+    // size_t remote_offset = rolling_iter;
+    wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
+    // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
+    // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
+    wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+    wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
+    wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
+    wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
+    // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
+    nb_tx[qp_cn]++;
+    if(FLAGS_test_lat){
+      clock_gettime(CLOCK_REALTIME, &lat_start);
+    }
+
+    //printf("ready to post send, rolling_iter%d\n",rolling_iter);
+
+
+    int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+    rt_assert(ret == 0);
+    rolling_iter++;
+
+    //printf("finish to post send, rolling_iter%d\n",rolling_iter);
+    if(FLAGS_test_lat){
+      int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy_srm(cb);
+        return;
+      }
+      clock_gettime(CLOCK_REALTIME, &lat_end);
+      double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
+                          (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
+      lats.push_back(lat_sec);
+      }
+
    
     //printf("%zu\n",rolling_iter);
   }
