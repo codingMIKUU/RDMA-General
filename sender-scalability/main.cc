@@ -122,14 +122,14 @@ void run_server(thread_params_t* params) {
   for (size_t i = 0; i < conn_config.num_qps; i++) {
     char srv_qp_name[kHrdQPNameSize];
     size_t clt_id =(cb->conn_config.use_xrc?i*clt_num_threads:i);
-    sprintf(srv_qp_name, "server-%zu", clt_id);
+    sprintf(srv_qp_name, "server-%zu-%zu",srv_gid, clt_id);
     hrd_publish_conn_qp(cb,i, srv_qp_name);
   }
 
   hrd_qp_attr_t* clt_qp[kAppQPsNum];
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu", i);
+    sprintf(clt_qp_name, "client-%zu-%zu", srv_gid, i);
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
@@ -166,10 +166,11 @@ void run_server(thread_params_t* params) {
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
 
-  uint32_t gap_deadline = 0, gap_cycles = 0;
+  uint32_t gap_deadline = 0, gap_cycles = 0,now_cycles = 0;
   if(FLAGS_rate_limit)
     gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
 
+  int real_sz = srv_gid == 0? FLAGS_size : FLAGS_size/4;
   while (1) {
     if (rolling_iter >= MB(4)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
@@ -194,27 +195,26 @@ void run_server(thread_params_t* params) {
           run_seconds, FLAGS_run_time);
 
       params->tput[srv_gid] = tput;
-      if (srv_gid == 0) {
-        double tot = 0;
-        for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
-        hrd_red_printf("Total tput = %.2f ops\n", tot);
-      }
 
       rolling_iter = 0;
       clock_gettime(CLOCK_REALTIME, &msr_start);
 
-      if(FLAGS_test_lat){
+      if(srv_gid){
         sort(lats.begin(),lats.end());
-        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
+        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f(us)\n",
                lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
                lats[lats.size() * 99 / 100]);
         lats.clear();
       }
     }
-    if(gap_deadline > get_cycles()){
-      continue;
+    
+    if(FLAGS_rate_limit){
+      now_cycles = get_cycles();
+      if(gap_deadline >now_cycles){
+        continue;
+      }
+      gap_deadline = now_cycles + gap_cycles;
     }
-    gap_deadline = get_cycles() + gap_cycles;
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
 
@@ -234,8 +234,8 @@ void run_server(thread_params_t* params) {
     wr.next = nullptr;
     wr.sg_list = &sgl;
 
-    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
-    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0||srv_gid ? IBV_SEND_SIGNALED : 0;
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!srv_gid) {
       // This can happen if a client dies before the server
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
@@ -247,7 +247,7 @@ void run_server(thread_params_t* params) {
     //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-    sgl.length = FLAGS_size;
+    sgl.length = real_sz;
     sgl.lkey = cb->conn_buf_mr->lkey;
 
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
@@ -257,13 +257,13 @@ void run_server(thread_params_t* params) {
     // wr.wr.rdma.rkey = 0;
     wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
     nb_tx[qp_cn]++;
-    if(FLAGS_test_lat){
+    if(srv_gid){
       clock_gettime(CLOCK_REALTIME, &lat_start);
     }
     int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
     rt_assert(ret == 0);
     rolling_iter++;
-    if(FLAGS_test_lat){
+    if(srv_gid){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
@@ -304,14 +304,14 @@ void run_server_srm(thread_params_t* params) {
 
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu", i);
+    sprintf(srv_qp_name, "server-%zu-%zu",srv_gid, i);
     hrd_publish_conn_qp_srm(cb,i, srv_qp_name);
   }
 
   hrd_qp_attr_t* clt_qp[kAppQPsNum];
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu", i);
+    sprintf(clt_qp_name, "client-%zu-%zu", srv_gid,i);
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
@@ -320,12 +320,11 @@ void run_server_srm(thread_params_t* params) {
     }
 
     
-    if(i%clt_num_threads == 0){
-      printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-      int ret=hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
-      if(ret==-1) {hrd_ctrl_blk_destroy_srm(cb);printf("srm failed creating,删用户态资源\n");return;}
-      hrd_wait_till_ready(clt_qp_name);
-    }
+    printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
+    int ret=hrd_connect_qp_srm(cb, i/clt_num_threads, clt_qp[i]);
+    if(ret==-1) {hrd_ctrl_blk_destroy_srm(cb);printf("srm failed creating,删用户态资源\n");return;}
+    hrd_wait_till_ready(clt_qp_name);
+    
     printf("服务端lkey：%d，收到的rkey：%d\n",cb->conn_buf_mr->lkey,clt_qp[i]->rkey);
   }
   
@@ -349,10 +348,10 @@ void run_server_srm(thread_params_t* params) {
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
 
-  uint32_t gap_deadline = 0, gap_cycles = 0;
+  uint32_t gap_deadline = 0, gap_cycles = 0, now_cycles = 0;
   if(FLAGS_rate_limit)
     gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
-
+  int real_sz = srv_gid == 0? FLAGS_size : FLAGS_size/4;
   while (1) {
     if (rolling_iter >= MB(4)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
@@ -377,18 +376,12 @@ void run_server_srm(thread_params_t* params) {
           run_seconds, FLAGS_run_time);
 
       params->tput[srv_gid] = tput;
-      if (srv_gid == 0) {
-        double tot = 0;
-        for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
-        hrd_red_printf("Total tput = %.2f ops\n", tot);
-      }
-
       rolling_iter = 0;
       clock_gettime(CLOCK_REALTIME, &msr_start);
 
-      if(FLAGS_test_lat){
+      if(srv_gid){
         sort(lats.begin(),lats.end());
-        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
+        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f(us)\n",
                lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
                lats[lats.size() * 99 / 100]);
         lats.clear();
@@ -396,10 +389,13 @@ void run_server_srm(thread_params_t* params) {
       // hrd_ctrl_blk_destroy(cb);
       // return ;
     }
-    if(gap_deadline > get_cycles()){
-      continue;
+    if(FLAGS_rate_limit){
+      now_cycles = get_cycles();
+      if(gap_deadline >now_cycles){
+        continue;
+      }
+      gap_deadline = now_cycles + gap_cycles;
     }
-    gap_deadline = get_cycles() + gap_cycles;
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
     
@@ -416,7 +412,7 @@ void run_server_srm(thread_params_t* params) {
     size_t cn = hrd_fastrand(&seed) % kAppQPsNum;
     size_t qp_cn = cn;
 
-    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
+    if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 && !srv_gid) {
       //printf("ready to poll cq\n");
       // This can happen if a client dies before the server
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
@@ -431,7 +427,7 @@ void run_server_srm(thread_params_t* params) {
     wr.next = nullptr;
     wr.sg_list = &sgl;
     
-    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
+    wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 || srv_gid? IBV_SEND_SIGNALED : 0;
 
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
@@ -449,7 +445,7 @@ void run_server_srm(thread_params_t* params) {
     wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
     // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
     nb_tx[qp_cn]++;
-    if(FLAGS_test_lat){
+    if(srv_gid){
       clock_gettime(CLOCK_REALTIME, &lat_start);
     }
 
@@ -461,7 +457,7 @@ void run_server_srm(thread_params_t* params) {
     rolling_iter++;
 
     //printf("finish to post send, rolling_iter%d\n",rolling_iter);
-    if(FLAGS_test_lat){
+    if(srv_gid){
       int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy_srm(cb);
@@ -471,7 +467,7 @@ void run_server_srm(thread_params_t* params) {
       double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
                           (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
       lats.push_back(lat_sec);
-      }
+    }
 
    
     //printf("%zu\n",rolling_iter);
@@ -494,7 +490,7 @@ void run_client(thread_params_t* params) {
 
   size_t clt_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : clt_gid % 2;
-  int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
+  int shm_key = kAppBaseSHMKey + clt_gid;
 
   hrd_conn_config_t conn_config;
   
@@ -521,13 +517,13 @@ void run_client(thread_params_t* params) {
 
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu", i);
+    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid,i);
     hrd_publish_conn_qp(cb, i, clt_qp_name);
   }
   if(!cb->conn_config.use_xrc || fst_client_t){
     for (size_t i = 0; i < kAppQPsNum; i++) {
       char srv_qp_name[kHrdQPNameSize];
-      sprintf(srv_qp_name, "server-%zu", i);
+      sprintf(srv_qp_name, "server-%zu-%zu", clt_gid,i);
 
       hrd_qp_attr_t* srv_qp = nullptr;
       while (srv_qp == nullptr) {
@@ -539,7 +535,7 @@ void run_client(thread_params_t* params) {
       hrd_connect_qp(cb, i, srv_qp);
 
       char clt_qp_name[kHrdQPNameSize];
-      sprintf(clt_qp_name, "client-%zu",i);
+      sprintf(clt_qp_name, "client-%zu-%zu",clt_gid,i);
       hrd_publish_ready(clt_qp_name);
       print_qp_info(srv_qp);
     }
@@ -588,7 +584,7 @@ void run_client_srm(thread_params_t* params) {
 
   size_t clt_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : clt_gid % 2;
-  int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
+  int shm_key = kAppBaseSHMKey + clt_gid;
 
   hrd_conn_config_t conn_config;
   //TODO:xrcd fd
@@ -612,12 +608,12 @@ void run_client_srm(thread_params_t* params) {
 
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu", i);
+    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid,i);
     hrd_publish_conn_qp_srm(cb, i, clt_qp_name);
   }
   for (size_t i = 0; i < kAppQPsNum; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu", i);
+    sprintf(srv_qp_name, "server-%zu-%zu",clt_gid, i);
 
     hrd_qp_attr_t* srv_qp = nullptr;
     while (srv_qp == nullptr) {
@@ -630,7 +626,7 @@ void run_client_srm(thread_params_t* params) {
     //hrd_connect_qp_srm(cb, i, srv_qp);
 
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu",i);
+    sprintf(clt_qp_name, "client-%zu-%zu",clt_gid,i);
     hrd_publish_ready(clt_qp_name);
   }
   
@@ -702,6 +698,10 @@ int main(int argc, char* argv[]) {
 
     //if (FLAGS_do_read == 0) rt_assert(FLAGS_size <= kHrdMaxInline, "Inl error");//now not inline
     rt_assert(FLAGS_do_read <= 1, "Invalid do_read");
+  }
+
+  if(num_threads == 1 && FLAGS_test_lat_thread == 1){
+    num_threads++;
   }
 
   // Launch the server or client threads
