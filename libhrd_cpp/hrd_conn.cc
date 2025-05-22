@@ -595,7 +595,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
     }
   }
   else{
-    for (size_t i = 0; i < cb->conn_config.rnum_threads; i++) {
+    for (size_t i = 0; i < 1; i++) {
 
       rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
                 "Failed to destroy connected CQ");
