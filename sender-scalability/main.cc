@@ -27,9 +27,10 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 1;
-static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 64;
+static constexpr size_t kAppQPsNum = 32;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -55,6 +56,8 @@ DEFINE_uint64(size, 0, "RDMA size");
 DEFINE_uint64(use_xrc,0,"Use XRC");
 DEFINE_uint64(test_lat,0,"Test latency");
 DEFINE_uint64(use_srm,0,"Test SRM QPs");
+DEFINE_uint64(rate_limit,0,"Limit rate(Gbps)");
+DEFINE_uint64(test_lat_thread,0,"Test latency thread");
 
 void print_qp_info(struct hrd_qp_attr_t *info) {
   printf("QP Number: %u\n", info->qpn);
@@ -66,7 +69,30 @@ void print_qp_info(struct hrd_qp_attr_t *info) {
   printf("r_key: %u\n", info->rkey);
   printf("addr: %lu\n", info->buf_addr);
 }
+static uint32_t calc_gap_cycles(int rate_limit_gbps){
+    int rate_limit_pps,cpu_mhz;
+    double number_of_bursts,gap_time;
+    uint32_t gap_cycles;
+    rate_limit_pps = ((double)(rate_limit_gbps) / (FLAGS_size * 8)) * 1000000000;
 
+		cpu_mhz = 3400;
+
+		number_of_bursts = (double)rate_limit_pps / (double)1;//每次发送都判断？
+		gap_time = 1000000 * (1.0 / number_of_bursts);
+		gap_cycles = cpu_mhz * gap_time;
+
+
+    return gap_cycles;
+}
+static inline uint32_t get_cycles()
+{
+	unsigned low, high;
+	unsigned long long val;
+	asm volatile ("rdtsc" : "=a" (low), "=d" (high));
+	val = high;
+	val = (val << 32) | low;
+	return val;
+}
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -74,7 +100,7 @@ void run_server(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = (FLAGS_use_xrc?kAppNumClientMachines: kAppNumClients);
+  conn_config.num_qps = kAppQPsNum;
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
@@ -96,14 +122,14 @@ void run_server(thread_params_t* params) {
   for (size_t i = 0; i < conn_config.num_qps; i++) {
     char srv_qp_name[kHrdQPNameSize];
     size_t clt_id =(cb->conn_config.use_xrc?i*clt_num_threads:i);
-    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, clt_id);
+    sprintf(srv_qp_name, "server-%zu", clt_id);
     hrd_publish_conn_qp(cb,i, srv_qp_name);
   }
 
-  hrd_qp_attr_t* clt_qp[kAppNumClients];
-  for (size_t i = 0; i < kAppNumClients; i++) {
+  hrd_qp_attr_t* clt_qp[kAppQPsNum];
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", i, srv_gid);
+    sprintf(clt_qp_name, "client-%zu", i);
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
@@ -127,7 +153,7 @@ void run_server(thread_params_t* params) {
   struct ibv_sge sgl;
   struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppQPsNum] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
 
   struct timespec run_start, run_end;
@@ -139,6 +165,10 @@ void run_server(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
+
+  uint32_t gap_deadline = 0, gap_cycles = 0;
+  if(FLAGS_rate_limit)
+    gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
 
   while (1) {
     if (rolling_iter >= MB(4)) {
@@ -160,7 +190,7 @@ void run_server(thread_params_t* params) {
           "main: Server %zu: %.2f ops. Total active QPs = %zu. "
           "Outstanding ops per thread (for READs) = %zu. "
           "Seconds = %.1f of %zu.\n",
-          srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+          srv_gid, tput, kAppQPsNum, kAppWindowSize,
           run_seconds, FLAGS_run_time);
 
       params->tput[srv_gid] = tput;
@@ -181,6 +211,10 @@ void run_server(thread_params_t* params) {
         lats.clear();
       }
     }
+    if(gap_deadline > get_cycles()){
+      continue;
+    }
+    gap_deadline = get_cycles() + gap_cycles;
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
 
@@ -193,7 +227,7 @@ void run_server(thread_params_t* params) {
     }
 
     // Choose the next client to send a packet to
-    size_t cn = hrd_fastrand(&seed) % kAppNumClients;
+    size_t cn = hrd_fastrand(&seed) % kAppQPsNum;
     size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
@@ -252,7 +286,7 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumClientMachines;
+  conn_config.num_qps = kAppQPsNum;
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
@@ -268,16 +302,16 @@ void run_server_srm(thread_params_t* params) {
   // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
-  for (size_t i = 0; i < kAppNumClients; i++) {
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
+    sprintf(srv_qp_name, "server-%zu", i);
     hrd_publish_conn_qp_srm(cb,i, srv_qp_name);
   }
 
-  hrd_qp_attr_t* clt_qp[kAppNumClients];
-  for (size_t i = 0; i < kAppNumClients; i++) {
+  hrd_qp_attr_t* clt_qp[kAppQPsNum];
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", i, srv_gid);
+    sprintf(clt_qp_name, "client-%zu", i);
 
     clt_qp[i] = nullptr;
     while (clt_qp[i] == nullptr) {
@@ -302,7 +336,7 @@ void run_server_srm(thread_params_t* params) {
   struct ibv_sge sgl;
   struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppQPsNum] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
 
   struct timespec run_start, run_end;
@@ -314,6 +348,10 @@ void run_server_srm(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
+
+  uint32_t gap_deadline = 0, gap_cycles = 0;
+  if(FLAGS_rate_limit)
+    gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
 
   while (1) {
     if (rolling_iter >= MB(4)) {
@@ -335,7 +373,7 @@ void run_server_srm(thread_params_t* params) {
           "main: Server %zu: %.2f ops. Total active QPs = %zu. "
           "Outstanding ops per thread (for READs) = %zu. "
           "Seconds = %.1f of %zu.\n",
-          srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+          srv_gid, tput, kAppQPsNum, kAppWindowSize,
           run_seconds, FLAGS_run_time);
 
       params->tput[srv_gid] = tput;
@@ -358,6 +396,10 @@ void run_server_srm(thread_params_t* params) {
       // hrd_ctrl_blk_destroy(cb);
       // return ;
     }
+    if(gap_deadline > get_cycles()){
+      continue;
+    }
+    gap_deadline = get_cycles() + gap_cycles;
 
     size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
     
@@ -371,8 +413,8 @@ void run_server_srm(thread_params_t* params) {
     // }
 
     // Choose the next client to send a packet to
-    size_t cn = hrd_fastrand(&seed) % kAppNumClients;
-    size_t qp_cn = cn/clt_num_threads;
+    size_t cn = hrd_fastrand(&seed) % kAppQPsNum;
+    size_t qp_cn = cn;
 
     if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
       //printf("ready to poll cq\n");
@@ -465,7 +507,7 @@ void run_client(thread_params_t* params) {
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid%num_threads==0);
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
-  conn_config.num_qps = (!FLAGS_use_xrc||conn_config.fst_client_t? kAppNumServers:0);
+  conn_config.num_qps = kAppQPsNum;
   conn_config.rnum_threads = kAppNumServers;
 
   bool fst_client_t = conn_config.fst_client_t;
@@ -477,15 +519,15 @@ void run_client(thread_params_t* params) {
   // Set to some non-zero value so the server can detect READ completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
-  for (size_t i = 0; i < kAppNumServers; i++) {
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+    sprintf(clt_qp_name, "client-%zu", i);
     hrd_publish_conn_qp(cb, i, clt_qp_name);
   }
   if(!cb->conn_config.use_xrc || fst_client_t){
-    for (size_t i = 0; i < kAppNumServers; i++) {
+    for (size_t i = 0; i < kAppQPsNum; i++) {
       char srv_qp_name[kHrdQPNameSize];
-      sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
+      sprintf(srv_qp_name, "server-%zu", i);
 
       hrd_qp_attr_t* srv_qp = nullptr;
       while (srv_qp == nullptr) {
@@ -497,7 +539,7 @@ void run_client(thread_params_t* params) {
       hrd_connect_qp(cb, i, srv_qp);
 
       char clt_qp_name[kHrdQPNameSize];
-      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+      sprintf(clt_qp_name, "client-%zu",i);
       hrd_publish_ready(clt_qp_name);
       print_qp_info(srv_qp);
     }
@@ -558,6 +600,7 @@ void run_client_srm(thread_params_t* params) {
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid%num_threads==0);
   conn_config.num_qps = 0;
+  conn_config.rnum_qps = kAppQPsNum;
   conn_config.rnum_threads = kAppNumServers;
 
   bool fst_client_t = conn_config.fst_client_t;
@@ -567,14 +610,14 @@ void run_client_srm(thread_params_t* params) {
   // Set to zero value so the server can detect WRITE completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
-  for (size_t i = 0; i < kAppNumServers; i++) {
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+    sprintf(clt_qp_name, "client-%zu", i);
     hrd_publish_conn_qp_srm(cb, i, clt_qp_name);
   }
-  for (size_t i = 0; i < kAppNumServers; i++) {
+  for (size_t i = 0; i < kAppQPsNum; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
+    sprintf(srv_qp_name, "server-%zu", i);
 
     hrd_qp_attr_t* srv_qp = nullptr;
     while (srv_qp == nullptr) {
@@ -587,7 +630,7 @@ void run_client_srm(thread_params_t* params) {
     //hrd_connect_qp_srm(cb, i, srv_qp);
 
     char clt_qp_name[kHrdQPNameSize];
-    sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+    sprintf(clt_qp_name, "client-%zu",i);
     hrd_publish_ready(clt_qp_name);
   }
   

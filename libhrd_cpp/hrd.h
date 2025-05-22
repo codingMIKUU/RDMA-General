@@ -102,6 +102,7 @@ struct hrd_conn_config_t {
   int buf_shm_key;
   int xrcd_fd;
   int rnum_threads;
+  int rnum_qps;
 
 
   // Optional params with their default values

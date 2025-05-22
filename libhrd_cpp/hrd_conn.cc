@@ -581,7 +581,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
 
 
   if(cb->conn_config.is_client){
-    for(int i=0;i<cb->conn_config.rnum_threads;i++)
+    for(int i=0;i<cb->conn_config.rnum_qps;i++)
       rt_assert(ibv_destroy_srq(cb->srq[i])==0,"Failed to destroy srq");
   }
 
@@ -595,8 +595,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
     }
   }
   else{
-    for (size_t i = 0; i < cb->conn_config.rnum_threads; i++) {
-
+    for (size_t i = 0; i < 1; i++) {
       rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
                 "Failed to destroy connected CQ");
     }
@@ -638,7 +637,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
               "Failed to close device");
   }
   //Destroy ah
-  for(int i=0;i<cb->conn_config.num_qps;i++){
+  for(int i=0;i<1;i++){
     rt_assert(ibv_destroy_ah(cb->ahs[i]),"Failed to destroy ah");
   }
 
@@ -959,13 +958,14 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
   assert(cb->pd != nullptr && cb->resolve.ib_ctx != nullptr);
   //assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
-  //CQ不需要PD
-  cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
-                                  nullptr, nullptr, 0);
-  // We sometimes set Mellanox env variables for hugepage-backed queues.
-  rt_assert(cb->conn_cq[0] != nullptr,
-            "Failed to create conn CQ. Check hugepages and SHM limits?");
   if(cb->conn_config.is_client){
+    //CQ不需要PD
+    cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+                                    nullptr, nullptr, 0);
+    // We sometimes set Mellanox env variables for hugepage-backed queues.
+    rt_assert(cb->conn_cq[0] != nullptr,
+              "Failed to create conn CQ. Check hugepages and SHM limits?");
+
     //Create srq
     ibv_srq_init_attr_ex srq_init_attr;
     memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
@@ -977,14 +977,16 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     srq_init_attr.pd = cb->pd;
     srq_init_attr.attr.max_sge = 1;
     srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-    for(size_t i = 0;i<cb->conn_config.rnum_threads;i++){
+    for(size_t i = 0;i<cb->conn_config.rnum_qps;i++){
       cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
       rt_assert(cb->srq != nullptr,"Failed to Create srq");
     }
-  
+    return ;
   }
 #if (kHrdMlx5Atomics == false)
   for(int i = 0;i<cb->conn_config.num_qps;i++){
+    cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+      nullptr, nullptr, 0);
     struct ibv_qp_init_attr_ex create_attr;
     memset(&create_attr, 0, sizeof(struct ibv_qp_init_attr_ex));
 
@@ -998,7 +1000,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     
     
 
-    cb->conn_qp[0] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
+    cb->conn_qp[i] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
     // if(cb->conn_config.is_client)
     //   cb->conn_qp[i]->srq = cb->srq[0];
