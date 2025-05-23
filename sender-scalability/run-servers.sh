@@ -16,11 +16,11 @@ flags="
 	--dual_port 0 \
   --use_uc 0 \
 	--is_client 0 \
-	--size 4096 \
+	--size 65536 \
 	--run_time 1000 \
 	--do_read 0 \
 	--use_xrc 0 \
-	--test_lat 0 \
+	--test_lat 1 \
 	--use_srm 1
 "
 

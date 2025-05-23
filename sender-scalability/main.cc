@@ -7,6 +7,7 @@
 #include <iostream>
 #include <vector>
 #include <pthread.h>
+#include <numeric>
 
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -21,15 +22,15 @@ static constexpr size_t kAppRunTimeSlack = 10;
 // For WRITEs, this is hard to do unless we make every send() signaled. So,
 // the number of per-thread outstanding operations per thread with WRITEs is
 // O(NUM_CLIENTS * kAppUnsigBatch).
-static constexpr size_t kAppWindowSize = 32;
+static constexpr size_t kAppWindowSize = 1;
 static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 1;
-static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 8;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 64;
+static constexpr size_t kAppUnsigBatch = 1;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -139,6 +140,8 @@ void run_server(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
+  size_t cn,qp_cn;
+  cn = qp_cn = -1;
 
   while (1) {
     if (rolling_iter >= MB(4)) {
@@ -174,9 +177,10 @@ void run_server(thread_params_t* params) {
       clock_gettime(CLOCK_REALTIME, &msr_start);
 
       if(FLAGS_test_lat){
+        double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(),lats.end());
-        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
-               lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
+        printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
+               lats[0], lats[lats.size() - 1], avg, lats[lats.size() / 2],
                lats[lats.size() * 99 / 100]);
         lats.clear();
       }
@@ -193,8 +197,9 @@ void run_server(thread_params_t* params) {
     }
 
     // Choose the next client to send a packet to
-    size_t cn = hrd_fastrand(&seed) % kAppNumClients;
-    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
+    //size_t cn = (hrd_fastrand(&seed)) % kAppNumClients;
+    cn = (cn + 1)%kAppNumClients;
+    qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.next = nullptr;
@@ -314,6 +319,8 @@ void run_server_srm(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = 0xdeadbeef;
+  size_t qp_cn,cn;
+  qp_cn = cn = -1;
 
   while (1) {
     if (rolling_iter >= MB(4)) {
@@ -349,9 +356,10 @@ void run_server_srm(thread_params_t* params) {
       clock_gettime(CLOCK_REALTIME, &msr_start);
 
       if(FLAGS_test_lat){
+        double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(),lats.end());
-        printf("Latency(us): min = %.2f, max = %.2f, median = %.2f, 99th = %.2f\n",
-               lats[0], lats[lats.size() - 1], lats[lats.size() / 2],
+        printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f , median = %.2f, 99th = %.2f\n",
+               lats[0], lats[lats.size() - 1], avg,lats[lats.size()/2],
                lats[lats.size() * 99 / 100]);
         lats.clear();
       }
@@ -371,8 +379,9 @@ void run_server_srm(thread_params_t* params) {
     // }
 
     // Choose the next client to send a packet to
-    size_t cn = hrd_fastrand(&seed) % kAppNumClients;
-    size_t qp_cn = cn/clt_num_threads;
+    //size_t cn = hrd_fastrand(&seed) % kAppNumClients;
+    cn = (cn + 1)%kAppNumClients;
+    qp_cn = cn/clt_num_threads;
 
     if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
       //printf("ready to poll cq\n");
@@ -651,7 +660,7 @@ int main(int argc, char* argv[]) {
     num_threads = kAppNumClients / kAppNumClientMachines;
   } else {
     // All the buffers sent or received should fit in @conn_buf
-    rt_assert(FLAGS_size * kAppWindowSize < kAppBufSize, "");
+    //rt_assert(FLAGS_size * kAppWindowSize < kAppBufSize, "");
 
     num_threads = kAppNumServers;
     rt_assert(FLAGS_machine_id == std::numeric_limits<size_t>::max(), "");
