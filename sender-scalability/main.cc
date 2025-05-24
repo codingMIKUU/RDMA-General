@@ -30,8 +30,8 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 1;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 64;
-static constexpr size_t kAppQPsNum = 1;
+static constexpr size_t kAppUnsigBatch = 16;
+static constexpr size_t kAppQPsNum = 16;
 static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -173,6 +173,11 @@ void run_server(thread_params_t* params) {
     gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
 
   int real_sz = srv_gid == 0? FLAGS_size : FLAGS_size/4;
+  size_t qp_cn,cn;
+  qp_cn = cn = -1;
+  if(srv_gid){
+      sleep(30);
+  }
   while (1) {
     if (rolling_iter >= MB(4)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
@@ -201,7 +206,7 @@ void run_server(thread_params_t* params) {
       rolling_iter = 0;
       clock_gettime(CLOCK_REALTIME, &msr_start);
     }
-    if(srv_gid && rolling_iter >= MB(1)/4){
+    if(srv_gid && rolling_iter >= 128*KB(1)){
       double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
       sort(lats.begin(),lats.end());
       printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f(us)\n",
@@ -230,8 +235,9 @@ void run_server(thread_params_t* params) {
     }
 
     // Choose the next client to send a packet to
-    size_t cn = hrd_fastrand(&seed) % conn_config.num_qps;
-    size_t qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
+    //size_t cn = hrd_fastrand(&seed) % conn_config.num_qps;
+    cn = (cn+1)% conn_config.num_qps;
+    qp_cn = cb->conn_config.use_xrc?cn/clt_num_threads:cn;
     wr.opcode = opcode;
     wr.num_sge = 1;
     wr.next = nullptr;
@@ -357,6 +363,8 @@ void run_server_srm(thread_params_t* params) {
   if(FLAGS_rate_limit)
     gap_cycles = calc_gap_cycles(FLAGS_rate_limit);
   int real_sz = srv_gid == 0? FLAGS_size : FLAGS_size/4;
+  // size_t cn,qp_cn;
+  // cn = qp_cn = -1;
   while (1) {
     if (rolling_iter >= MB(4)) {
       clock_gettime(CLOCK_REALTIME, &msr_end);
@@ -385,7 +393,7 @@ void run_server_srm(thread_params_t* params) {
       clock_gettime(CLOCK_REALTIME, &msr_start);
     }
 
-    if(srv_gid && rolling_iter >= MB(1)/4){
+    if(srv_gid && rolling_iter >= MB(1)/128){
       double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
       sort(lats.begin(),lats.end());
       printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f(us)\n",
@@ -415,6 +423,7 @@ void run_server_srm(thread_params_t* params) {
 
     // Choose the next client to send a packet to
     size_t cn = hrd_fastrand(&seed) % conn_config.num_qps;
+    // cn = (cn+1)%conn_config.num_qps;
     size_t qp_cn = cn;
 
     if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 && !srv_gid) {
@@ -436,7 +445,7 @@ void run_server_srm(thread_params_t* params) {
 
 
     sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-    sgl.length = FLAGS_size;
+    sgl.length = real_sz;
     sgl.lkey = cb->conn_buf_mr->lkey;
 
     size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);

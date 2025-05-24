@@ -420,7 +420,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
   else
     cb->conn_cq = new ibv_cq*[cb->conn_config.num_qps];
   if(cb->conn_config.is_client)
-    cb->srq = new ibv_srq*[cb->conn_config.rnum_threads];
+    cb->srq = new ibv_srq*[cb->conn_config.rnum_qps];
   hrd_create_conn_qps_srm(cb);
   // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
   if (conn_config->prealloc_buf == nullptr) {
@@ -858,7 +858,7 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
       srq_init_attr.attr.max_sge = 1;
       srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
       cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
-      rt_assert(cb->srq != nullptr,"Failed to Create srq");
+      rt_assert(cb->srq[i] != nullptr,"Failed to Create srq");
     
     }
     if(cb->conn_config.is_client && !cb->conn_config.fst_client_t)
@@ -979,7 +979,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
     for(size_t i = 0;i<cb->conn_config.rnum_qps;i++){
       cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
-      rt_assert(cb->srq != nullptr,"Failed to Create srq");
+      rt_assert(cb->srq[i] != nullptr,"Failed to Create srq");
     }
     return ;
   }

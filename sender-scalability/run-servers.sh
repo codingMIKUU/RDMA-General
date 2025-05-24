@@ -17,12 +17,12 @@ flags="
   --use_uc 0 \
 	--is_client 0 \
 	--size 4096 \
-	--run_time 1000 \
+	--run_time 200 \
 	--do_read 0 \
 	--use_xrc 0 \
 	--test_lat 0 \
-	--use_srm 0 \
-	--rate_limit 60 \
+	--use_srm 1 \
+	--rate_limit 0 \
 	--test_lat_thread 1 \
 "
 
