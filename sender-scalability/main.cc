@@ -27,11 +27,11 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
-static constexpr size_t kAppNumClients = 8;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;
-static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
+//static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
 // We don't use postlist, so we don't need a postlist check
