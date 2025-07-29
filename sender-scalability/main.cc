@@ -10,7 +10,7 @@
 #include <numeric>
 #include <mutex>
 #include <condition_variable>
-
+#define CPU_FREQUENCY_HZ 2900000000.0
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
 
@@ -29,10 +29,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;
+static constexpr size_t kAppUnsigBatch = 512;
 //static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -60,12 +60,32 @@ DEFINE_uint64(test_lat,0,"Test latency");
 DEFINE_uint64(use_srm,0,"Test SRM QPs");
 DEFINE_uint64(test_lat_thread,0,"Test latency thread");
 
+size_t traffic_size[]={
+    64, 635, 1206, 1778, 2349, 3270, 4000, 4285, 4570, 4860, 
+    5145, 5431, 5716, 6002, 6287, 6572, 6867, 7152, 7438, 7723,
+    8000, 10000, 13000, 16000, 21300, 26602, 32000, 64000, 256000, 2000000
+    };//Alistorage分
+
+// size_t traffic_size[]={
+//     2, 2, 2, 2, 2, 3, 3, 5, 6, 10, 
+//     11, 12, 14, 16, 28, 44, 61, 85, 107, 119,
+//     167, 186, 233, 260, 325, 406, 508, 710, 1109, 96093
+//     };//Facebook_KVstorage
+
 
 // 全局变量
 std::mutex barrier_mutex;                  // 互斥锁保护
 std::condition_variable barrier_cv;       // 条件变量
 int barrier_count = 0;                    // 到达线程墙的线程计数
 // 线程墙实现
+
+static inline uint64_t rdtsc() {
+  unsigned int lo, hi;
+  __asm__ __volatile__ (
+      "rdtsc" : "=a" (lo), "=d" (hi)
+  );
+  return ((uint64_t)hi << 32) | lo;
+}
 void thread_barrier() {
     std::unique_lock<std::mutex> lock(barrier_mutex);
     barrier_count++;
@@ -382,6 +402,15 @@ void run_server_srm(thread_params_t* params) {
 
   hrd_ctrl_blk_t* cb ;
 
+  if(srv_gid == kAppNumServers){
+    while(1){
+      sleep(1);
+      std::unique_lock<std::mutex> lock(barrier_mutex);
+      if(barrier_count==kAppNumServers)
+        break;
+    }
+  }
+
   cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,conn_config.is_client,srm_cb,srm_pd);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 1 so that we can detect WRITE completion in client.
@@ -457,6 +486,10 @@ void run_server_srm(thread_params_t* params) {
   struct timespec run_start, run_end;
   struct timespec msr_start, msr_end;
   struct timespec lat_start, lat_end;
+
+  uint64_t lat_st,lat_ed;
+  double elapsed_cycles,elapsed_time_us ;
+
   clock_gettime(CLOCK_REALTIME, &run_start);
   clock_gettime(CLOCK_REALTIME, &msr_start);
   std::vector<double> lats;
@@ -465,6 +498,8 @@ void run_server_srm(thread_params_t* params) {
   uint64_t seed = 0xdeadbeef;
   size_t qp_cn,cn;
   qp_cn = cn = -1;
+
+  size_t real_sz;
 
   thread_barrier();
 
@@ -530,6 +565,9 @@ void run_server_srm(thread_params_t* params) {
       cn = (cn + 1)%kAppNumClients;
       qp_cn = cn/clt_num_threads;
 
+      real_sz = 4096;
+      //real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
         //printf("ready to poll cq\n");
         // This can happen if a client dies before the server
@@ -548,11 +586,11 @@ void run_server_srm(thread_params_t* params) {
       wr.send_flags = nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
 
 
-      sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-      sgl.length = FLAGS_size;
+      sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[0]);
+      sgl.length = real_sz;
       sgl.lkey = cb->conn_buf_mr->lkey;
 
-      size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+      size_t remote_offset = 0;
       // size_t remote_offset = rolling_iter;
       wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
       // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
@@ -561,6 +599,8 @@ void run_server_srm(thread_params_t* params) {
       wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
       wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
       wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
+
+      wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
       // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
       nb_tx[qp_cn]++;
       if(FLAGS_test_lat){
@@ -589,7 +629,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(512)){
+        if(rolling_iter>=KB(128)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -614,11 +654,11 @@ void run_server_srm(thread_params_t* params) {
         wr.send_flags =  IBV_SEND_SIGNALED;
 
 
-        sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-        sgl.length = 4096;
+        sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * 1024]);
+        sgl.length = 1024;
         sgl.lkey = cb->conn_buf_mr->lkey;
 
-        size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+        size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - 1024);
         // size_t remote_offset = rolling_iter;
         wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
@@ -627,16 +667,27 @@ void run_server_srm(thread_params_t* params) {
         wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
         wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
         wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
+
+        wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
         // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
         nb_tx[qp_cn]++;
 
-        clock_gettime(CLOCK_REALTIME, &lat_start);
+        //clock_gettime(CLOCK_REALTIME, &lat_start);
+
+        lat_st = rdtsc();
         
 
         //printf("ready to post send, rolling_iter%d\n",rolling_iter);
 
+        // uint64_t st_lat,ed_lat;
+        // st_lat = rdtsc();
 
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+        
+        // ed_lat = rdtsc();
+        // double e_cycles = (double)(ed_lat - st_lat);
+        // double e_t_us = (e_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+        // printf("post send cost %.2f us\n",e_t_us);
         rt_assert(ret == 0);
         rolling_iter++;
 
@@ -645,10 +696,14 @@ void run_server_srm(thread_params_t* params) {
           hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
-        clock_gettime(CLOCK_REALTIME, &lat_end);
-        double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
-                            (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
-        lats.push_back(lat_sec);
+        lat_ed = rdtsc();
+        elapsed_cycles = (double)(lat_ed - lat_st);
+        elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+        lats.push_back(elapsed_time_us);
+        // clock_gettime(CLOCK_REALTIME, &lat_end);
+        // double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
+        //                     (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
+        // lats.push_back(lat_sec);
     }
   }
 }
