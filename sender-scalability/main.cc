@@ -505,7 +505,7 @@ void run_server_srm(thread_params_t* params) {
 
   while (1) {
     if(srv_gid != kAppNumServers){
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= MB(1)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
@@ -629,7 +629,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(128)){
+        if(rolling_iter>=KB(64)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",

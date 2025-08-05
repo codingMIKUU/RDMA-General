@@ -23,7 +23,7 @@
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
 static constexpr size_t kHrdMaxInline = 128;
-static constexpr size_t kHrdSQDepth = 1024;   ///< Depth of all SEND queues
+static constexpr size_t kHrdSQDepth = 2048;   ///< Depth of all SEND queues
 static constexpr size_t kHrdRQDepth = 2048;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
