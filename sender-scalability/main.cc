@@ -10,6 +10,9 @@
 #include <numeric>
 #include <mutex>
 #include <condition_variable>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <cstdio>
 #define CPU_FREQUENCY_HZ 2900000000.0
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -46,6 +49,7 @@ ibv_pd *srm_pd;
 struct thread_params_t {
   size_t id;
   double* tput;
+  double* tput_Gbps;
 };
 
 DEFINE_uint64(machine_id, std::numeric_limits<size_t>::max(), "Machine ID");
@@ -72,6 +76,9 @@ size_t traffic_size[]={
 //     167, 186, 233, 260, 325, 406, 508, 710, 1109, 96093
 //     };//Facebook_KVstorage
 
+uint32_t *wqe_table;
+FILE * log_file ;
+
 
 // 全局变量
 std::mutex barrier_mutex;                  // 互斥锁保护
@@ -79,6 +86,18 @@ std::condition_variable barrier_cv;       // 条件变量
 int barrier_count = 0;                    // 到达线程墙的线程计数
 // 线程墙实现
 
+
+// 与内核模块一致的定义
+#define BRIDGE_IOCTL_MAGIC 'B'
+#define REG_TABLE_TO_MLX5 _IOW(BRIDGE_IOCTL_MAGIC, 0x01, struct user_table_info)
+
+struct user_table_info {
+    void *table_addr;
+    size_t table_size;
+};
+
+#define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*6)  // 表大小（页对齐，4KB=1页）
+#define DEV_PATH "/dev/mlx5_table_bridge"
 static inline uint64_t rdtsc() {
   unsigned int lo, hi;
   __asm__ __volatile__ (
@@ -89,6 +108,8 @@ static inline uint64_t rdtsc() {
 void thread_barrier() {
     std::unique_lock<std::mutex> lock(barrier_mutex);
     barrier_count++;
+    //通知下一个线程开始执行
+    barrier_cv.notify_all();
 
     if (barrier_count == kAppNumServers+FLAGS_test_lat_thread) {
         // 如果所有线程都到达，通知所有线程继续
@@ -212,7 +233,7 @@ void run_server(thread_params_t* params) {
   thread_barrier();
   while (1) {
     if(srv_gid != kAppNumServers){
-      if (rolling_iter >= KB(256)) {
+      if (rolling_iter >= MB(1)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
@@ -387,10 +408,10 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumClientMachines;
+  conn_config.num_qps = kAppNumClientMachines * 6;
   if(FLAGS_test_lat_thread && srv_gid == kAppNumServers){
     //lat thread
-    conn_config.num_qps = 1;
+    conn_config.num_qps = 6;
   }
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
@@ -402,14 +423,13 @@ void run_server_srm(thread_params_t* params) {
 
   hrd_ctrl_blk_t* cb ;
 
-  if(srv_gid == kAppNumServers){
-    while(1){
-      sleep(1);
-      std::unique_lock<std::mutex> lock(barrier_mutex);
-      if(barrier_count==kAppNumServers)
-        break;
-    }
+  {
+    // 等待逻辑
+    std::unique_lock<std::mutex> lock(barrier_mutex);
+    // 等待条件满足（等待时会释放锁，被唤醒后重新获取锁）
+    barrier_cv.wait(lock, [&](){ return barrier_count == srv_gid; });
   }
+  
 
   cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,conn_config.is_client,srm_cb,srm_pd);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
@@ -480,7 +500,7 @@ void run_server_srm(thread_params_t* params) {
   struct ibv_sge sgl;
   struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppNumClients*6] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
 
   struct timespec run_start, run_end;
@@ -500,16 +520,18 @@ void run_server_srm(thread_params_t* params) {
   qp_cn = cn = -1;
 
   size_t real_sz;
+  double tot_sz = 0;
 
   thread_barrier();
 
   while (1) {
     if(srv_gid != kAppNumServers){
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(256)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
         double tput = rolling_iter / msr_seconds;
+        double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
 
         clock_gettime(CLOCK_REALTIME, &run_end);
         double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
@@ -521,20 +543,25 @@ void run_server_srm(thread_params_t* params) {
         }
 
         printf(
-            "main: Server %zu: %.2f ops. Total active QPs = %zu. "
+            "main: Server %zu: %.2f ops, %.2f Gbps. Total active QPs = %zu. "
             "Outstanding ops per thread (for READs) = %zu. "
             "Seconds = %.1f of %zu.\n",
-            srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+            srv_gid, tput,tput_Gbps, kAppNumServers * kAppNumClients, kAppWindowSize,
             run_seconds, FLAGS_run_time);
 
         params->tput[srv_gid] = tput;
+        params->tput_Gbps[srv_gid] = tput_Gbps;
         if (srv_gid == 0) {
-          double tot = 0;
-          for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
-          hrd_red_printf("Total tput = %.2f ops\n", tot);
+          double tot = 0,tot_Gbps = 0;
+          for (size_t i = 0; i < kAppNumServers; i++){
+            tot += params->tput[i];
+            tot_Gbps += params->tput_Gbps[i];
+          }
+          hrd_red_printf("Total tput = %.2f ops,%.2f Gbps\n", tot,tot_Gbps);
         }
 
         rolling_iter = 0;
+        tot_sz = 0;
         clock_gettime(CLOCK_REALTIME, &msr_start);
 
         if(FLAGS_test_lat){
@@ -563,11 +590,37 @@ void run_server_srm(thread_params_t* params) {
       // Choose the next client to send a packet to
       //size_t cn = hrd_fastrand(&seed) % kAppNumClients;
       cn = (cn + 1)%kAppNumClients;
-      qp_cn = cn/clt_num_threads;
 
-      real_sz = 4096;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+      //real_sz = KB(4);
+      real_sz = traffic_size[hrd_fastrand(&seed) % 30];
 
+      //real_sz = std::min(real_sz,KB(500));
+
+      tot_sz+=real_sz;
+
+      //根据real_sz选择对应srm qp
+      if(real_sz < KB(2)){
+        qp_cn = 0;
+      }
+      else if(real_sz <KB(4)){
+        qp_cn = 1;
+      }
+      else if(real_sz<KB(7)){
+        qp_cn = 2;
+      }
+      else if(real_sz<KB(10)){
+        qp_cn = 3;
+      }
+      else if(real_sz<KB(100)){
+        qp_cn = 4;
+      }
+      else{
+        //>100KB
+        qp_cn = 5;
+      }
+
+      
+      //随机选应该poll哪个srm qp（<=4KB，4KB < <=10KB，>10KB）
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
         //printf("ready to poll cq\n");
         // This can happen if a client dies before the server
@@ -578,6 +631,7 @@ void run_server_srm(thread_params_t* params) {
         }
         //printf("complete to poll cq\n");
       }
+
       wr.opcode = opcode;
       wr.num_sge = 1;
       wr.next = nullptr;
@@ -611,6 +665,18 @@ void run_server_srm(thread_params_t* params) {
 
 
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+      //wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
+      // printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
+      //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
+      //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
+      __atomic_fetch_add(wqe_table+qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
+
+      // fprintf(log_file,"当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
+      //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
+      //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
+      //fflush(log_file);
+
+      
       rt_assert(ret == 0);
       rolling_iter++;
 
@@ -683,6 +749,12 @@ void run_server_srm(thread_params_t* params) {
         // st_lat = rdtsc();
 
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+        //wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
+        // printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
+        //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
+        //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
+
+        __atomic_fetch_add(wqe_table+qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,1,__ATOMIC_SEQ_CST);
         
         // ed_lat = rdtsc();
         // double e_cycles = (double)(ed_lat - st_lat);
@@ -983,6 +1055,59 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
+  //mmap表
+  int fd, ret;
+  struct user_table_info info;
+
+  // 1. 分配页对齐的用户态内存（表）
+  void *table = mmap(
+      NULL,
+      TABLE_SIZE,
+      PROT_READ | PROT_WRITE,
+      MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+      -1,
+      0
+  );
+  if (table == MAP_FAILED) {
+      perror("mmap失败");
+      return -1;
+  }
+  printf("用户态表创建成功：地址=%p，大小=%d字节\n", table, TABLE_SIZE);
+
+  // 2. 初始化表数据
+  wqe_table = (uint32_t *)table;
+  for (int i = 0; i < TABLE_SIZE / sizeof(uint32_t); i++) {
+      wqe_table[i] = 0;
+  }
+
+  // 3. 打开内核设备
+  fd = open(DEV_PATH, O_RDWR);
+  if (fd < 0) {
+      perror("打开设备失败");
+      munmap(table, TABLE_SIZE);
+      return -1;
+  }
+
+  // 4. 通过ioctl传递表信息给内核
+  info.table_addr = table;
+  info.table_size = TABLE_SIZE;
+  ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
+  if (ret < 0) {
+      perror("ioctl失败");
+      close(fd);
+      munmap(table, TABLE_SIZE);
+      return -1;
+  }
+
+
+  // log_file = fopen("log.txt", "w");
+  // if(log_file == NULL){
+  //   perror("fopen失败");
+  //   return -1;
+  // }
+
+
+
   size_t num_threads;
   if (FLAGS_is_client == 1) {
     num_threads = kAppNumClients / kAppNumClientMachines;
@@ -1005,7 +1130,7 @@ int main(int argc, char* argv[]) {
   std::vector<thread_params_t> param_arr(num_threads);
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
-  double tput[num_threads];
+  double tput[num_threads],tput_Gbps[num_threads];
 
 
   if(FLAGS_use_srm && !FLAGS_is_client){
@@ -1026,6 +1151,7 @@ int main(int argc, char* argv[]) {
     } else {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
+      param_arr[i].tput_Gbps = tput_Gbps;
       if(!FLAGS_use_srm)
         thread_arr[i] = std::thread(run_server, &param_arr[i]);
       else {
@@ -1039,5 +1165,11 @@ int main(int argc, char* argv[]) {
     ibv_dealloc_pd(srm_pd);
     ibv_close_device(srm_cb->resolve.ib_ctx);
   }
+
+  close(fd);
+  munmap(table, TABLE_SIZE);
+
+
+  // fclose(log_file);
   return 0;
 }
