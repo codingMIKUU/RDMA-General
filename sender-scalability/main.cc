@@ -46,6 +46,7 @@ ibv_pd *srm_pd;
 struct thread_params_t {
   size_t id;
   double* tput;
+  double* tput_Gbps;
 };
 
 DEFINE_uint64(machine_id, std::numeric_limits<size_t>::max(), "Machine ID");
@@ -500,16 +501,17 @@ void run_server_srm(thread_params_t* params) {
   qp_cn = cn = -1;
 
   size_t real_sz;
-
+  double tot_sz = 0;
   thread_barrier();
 
   while (1) {
     if(srv_gid != kAppNumServers){
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(512)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
         double tput = rolling_iter / msr_seconds;
+        double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
 
         clock_gettime(CLOCK_REALTIME, &run_end);
         double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
@@ -521,20 +523,23 @@ void run_server_srm(thread_params_t* params) {
         }
 
         printf(
-            "main: Server %zu: %.2f ops. Total active QPs = %zu. "
+            "main: Server %zu: %.2f ops, %.2f Gbps. Total active QPs = %zu. "
             "Outstanding ops per thread (for READs) = %zu. "
             "Seconds = %.1f of %zu.\n",
-            srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+            srv_gid, tput,tput_Gbps, kAppNumServers * kAppNumClients, kAppWindowSize,
             run_seconds, FLAGS_run_time);
 
         params->tput[srv_gid] = tput;
+        params->tput_Gbps[srv_gid] = tput_Gbps;
         if (srv_gid == 0) {
-          double tot = 0;
+          double tot = 0,tot_Gbps = 0;
           for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
-          hrd_red_printf("Total tput = %.2f ops\n", tot);
+          for(size_t i = 0; i < kAppNumServers; i++) tot_Gbps += params->tput_Gbps[i];
+          hrd_red_printf("Total tput = %.2f ops, total tput_Gbps = %.2f Gbps\n", tot,tot_Gbps);
         }
 
         rolling_iter = 0;
+        tot_sz = 0;
         clock_gettime(CLOCK_REALTIME, &msr_start);
 
         if(FLAGS_test_lat){
@@ -613,6 +618,7 @@ void run_server_srm(thread_params_t* params) {
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
       rt_assert(ret == 0);
       rolling_iter++;
+      tot_sz += real_sz;
 
       //printf("finish to post send, rolling_iter%d\n",rolling_iter);
       if(FLAGS_test_lat){
@@ -1005,7 +1011,7 @@ int main(int argc, char* argv[]) {
   std::vector<thread_params_t> param_arr(num_threads);
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
-  double tput[num_threads];
+  double tput[num_threads],tput_Gbps[num_threads];
 
 
   if(FLAGS_use_srm && !FLAGS_is_client){
@@ -1026,6 +1032,7 @@ int main(int argc, char* argv[]) {
     } else {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
+      param_arr[i].tput_Gbps = tput_Gbps;
       if(!FLAGS_use_srm)
         thread_arr[i] = std::thread(run_server, &param_arr[i]);
       else {
