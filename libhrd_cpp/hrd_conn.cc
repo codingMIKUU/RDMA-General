@@ -959,13 +959,16 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
   assert(cb->pd != nullptr && cb->resolve.ib_ctx != nullptr);
   //assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
-  //CQ不需要PD
-  cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
-                                  nullptr, nullptr, 0);
-  // We sometimes set Mellanox env variables for hugepage-backed queues.
-  rt_assert(cb->conn_cq[0] != nullptr,
-            "Failed to create conn CQ. Check hugepages and SHM limits?");
+
   if(cb->conn_config.is_client){
+
+    //CQ不需要PD
+    cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+      nullptr, nullptr, 0);
+    // We sometimes set Mellanox env variables for hugepage-backed queues.
+    rt_assert(cb->conn_cq[0] != nullptr,
+    "Failed to create conn CQ. Check hugepages and SHM limits?");
+
     //Create srq
     ibv_srq_init_attr_ex srq_init_attr;
     memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
@@ -983,6 +986,16 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     }
   
   }
+  else{
+    for(int i=0;i<cb->conn_config.num_qps;i++){
+      //CQ不需要PD
+      cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+                                     nullptr, nullptr, 0);
+      // We sometimes set Mellanox env variables for hugepage-backed queues.
+      rt_assert(cb->conn_cq[i] != nullptr,
+                "Failed to create conn CQ. Check hugepages and SHM limits?");
+    }
+  }
 #if (kHrdMlx5Atomics == false)
   for(int i = 0;i<cb->conn_config.num_qps;i++){
     struct ibv_qp_init_attr_ex create_attr;
@@ -998,7 +1011,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     
     
 
-    cb->conn_qp[0] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
+    cb->conn_qp[i] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
     // if(cb->conn_config.is_client)
     //   cb->conn_qp[i]->srq = cb->srq[0];
