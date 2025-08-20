@@ -74,6 +74,9 @@ size_t traffic_size[]={
 //     };//Facebook_KVstorage
 
 
+uint64_t seed_array[kAppNumServers];  
+
+
 // 全局变量
 std::mutex barrier_mutex;                  // 互斥锁保护
 std::condition_variable barrier_cv;       // 条件变量
@@ -496,7 +499,7 @@ void run_server_srm(thread_params_t* params) {
   std::vector<double> lats;
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
-  uint64_t seed = 0xdeadbeef;
+  uint64_t seed = seed_array[srv_gid%kAppNumServers];
   size_t qp_cn,cn;
   qp_cn = cn = -1;
 
@@ -635,7 +638,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(64)){
+        if(rolling_iter>=KB(16)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -982,6 +985,20 @@ void set_thread_priority(std::thread &t) {
         std::cerr << "Failed to set thread priority: " << strerror(errno) << std::endl;
     }
 }
+
+// 生成随机种子数组
+static void generate_random_seeds(uint64_t* seed_array, size_t count) {
+  // 选择初始种子（从之前的推荐中选取）
+  uint64_t initial_seed = 0xdeadbeefdeadbeef;
+  uint64_t current_seed = initial_seed;
+
+  for (size_t i = 0; i < count; i++) {
+      // 生成64位种子：高32位 + 低32位，各调用一次随机函数
+      uint32_t high = hrd_fastrand(&current_seed);
+      uint32_t low = hrd_fastrand(&current_seed);
+      seed_array[i] = ((uint64_t)high << 32) | low;
+  }
+}
 int main(int argc, char* argv[]) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
   rt_assert(FLAGS_dual_port <= 1, "Invalid dual_port");
@@ -1012,6 +1029,9 @@ int main(int argc, char* argv[]) {
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
   double tput[num_threads],tput_Gbps[num_threads];
+
+  //初始化随机数种子数组
+  generate_random_seeds(seed_array, kAppNumServers);
 
 
   if(FLAGS_use_srm && !FLAGS_is_client){
