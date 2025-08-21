@@ -638,7 +638,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(16)){
+        if(rolling_iter>=KB(256)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
