@@ -573,8 +573,8 @@ void run_server_srm(thread_params_t* params) {
       cn = (cn + 1)%kAppNumClients;
       qp_cn = cn/clt_num_threads;
 
-      real_sz = 4096;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+      //real_sz = 4096;
+      real_sz = traffic_size[hrd_fastrand(&seed) % 30];
 
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
         //printf("ready to poll cq\n");
@@ -638,7 +638,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(256)){
+        if(rolling_iter>=KB(2)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -664,10 +664,10 @@ void run_server_srm(thread_params_t* params) {
 
 
         sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * 1024]);
-        sgl.length = 1024;
+        sgl.length = traffic_size[hrd_fastrand(&seed) % 30];
         sgl.lkey = cb->conn_buf_mr->lkey;
 
-        size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - 1024);
+        size_t remote_offset = 0;
         // size_t remote_offset = rolling_iter;
         wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr+remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
@@ -706,9 +706,11 @@ void run_server_srm(thread_params_t* params) {
           return;
         }
         lat_ed = rdtsc();
-        elapsed_cycles = (double)(lat_ed - lat_st);
-        elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
-        lats.push_back(elapsed_time_us);
+        if(sgl.length <= KB(10)){
+          elapsed_cycles = (double)(lat_ed - lat_st);
+          elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+          lats.push_back(elapsed_time_us);
+        }
         // clock_gettime(CLOCK_REALTIME, &lat_end);
         // double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
         //                     (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
