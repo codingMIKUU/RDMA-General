@@ -79,7 +79,7 @@ size_t traffic_size[]={
 uint32_t *wqe_table;
 FILE * log_file ;
 
-uint64_t seed_array[kAppNumServers];  
+uint64_t seed_array[kAppNumServers+1];  
 
 
 // 全局变量
@@ -410,7 +410,7 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = kAppNumClientMachines * 6;
+  conn_config.num_qps =  6;
   if(FLAGS_test_lat_thread && srv_gid == kAppNumServers){
     //lat thread
     conn_config.num_qps = 6;
@@ -517,7 +517,7 @@ void run_server_srm(thread_params_t* params) {
   std::vector<double> lats;
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
-  uint64_t seed = seed_array[srv_gid%kAppNumServers];
+  uint64_t seed = seed_array[srv_gid];
   size_t qp_cn,cn;
   qp_cn = cn = -1;
 
@@ -710,8 +710,33 @@ void run_server_srm(thread_params_t* params) {
         size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
       
 
+        real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+        //real_sz = KB(1);
+
+        real_sz = std::min(real_sz,KB(9));
+  
+
         cn = 0;
-        qp_cn = 0;
+        //根据real_sz选择对应srm qp
+        if(real_sz < KB(2)){
+          qp_cn = 0;
+        }
+        else if(real_sz <KB(4)){
+          qp_cn = 1;
+        }
+        else if(real_sz<KB(7)){
+          qp_cn = 2;
+        }
+        else if(real_sz<KB(10)){
+          qp_cn = 3;
+        }
+        else if(real_sz<KB(100)){
+          qp_cn = 4;
+        }
+        else{
+          //>100KB
+          qp_cn = 5;
+        }
 
 
         wr.opcode = opcode;
@@ -723,7 +748,7 @@ void run_server_srm(thread_params_t* params) {
 
 
         sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * 1024]);
-        sgl.length = traffic_size[hrd_fastrand(&seed) % 30];
+        sgl.length = real_sz;
         sgl.lkey = cb->conn_buf_mr->lkey;
 
         size_t remote_offset = 0;
@@ -1126,7 +1151,7 @@ int main(int argc, char* argv[]) {
 
 
     //初始化随机数种子数组
-    generate_random_seeds(seed_array, kAppNumServers);
+    generate_random_seeds(seed_array, kAppNumServers+1);
 
 
   size_t num_threads;
