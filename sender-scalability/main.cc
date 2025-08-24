@@ -713,7 +713,7 @@ void run_server_srm(thread_params_t* params) {
         real_sz = traffic_size[hrd_fastrand(&seed) % 30];
         //real_sz = KB(1);
 
-        real_sz = std::min(real_sz,KB(9));
+        //real_sz = std::min(real_sz,KB(9));
   
 
         cn = 0;
