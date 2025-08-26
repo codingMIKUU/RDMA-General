@@ -10,6 +10,7 @@
 #include <numeric>
 #include <mutex>
 #include <condition_variable>
+#include <fstream>
 #define CPU_FREQUENCY_HZ 2900000000.0
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -61,12 +62,13 @@ DEFINE_uint64(test_lat,0,"Test latency");
 DEFINE_uint64(use_srm,0,"Test SRM QPs");
 DEFINE_uint64(test_lat_thread,0,"Test latency thread");
 
-size_t traffic_size[]={
-    64, 635, 1206, 1778, 2349, 3270, 4000, 4285, 4570, 4860, 
-    5145, 5431, 5716, 6002, 6287, 6572, 6867, 7152, 7438, 7723,
-    8000, 10000, 13000, 16000, 21300, 26602, 32000, 64000, 256000, 2000000
-    };//Alistorage分
+// size_t traffic_size[]={
+//     64, 635, 1206, 1778, 2349, 3270, 4000, 4285, 4570, 4860, 
+//     5145, 5431, 5716, 6002, 6287, 6572, 6867, 7152, 7438, 7723,
+//     8000, 10000, 13000, 16000, 21300, 26602, 32000, 64000, 256000, 2000000
+//     };//Alistorage分
 
+std::vector<size_t>traffic_size;
 // size_t traffic_size[]={
 //     2, 2, 2, 2, 2, 3, 3, 5, 6, 10, 
 //     11, 12, 14, 16, 28, 44, 61, 85, 107, 119,
@@ -574,7 +576,7 @@ void run_server_srm(thread_params_t* params) {
       qp_cn = cn/clt_num_threads;
 
       //real_sz = 4096;
-      real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
         //printf("ready to poll cq\n");
@@ -664,7 +666,7 @@ void run_server_srm(thread_params_t* params) {
 
 
         sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * 1024]);
-        sgl.length = traffic_size[hrd_fastrand(&seed) % 30];
+        sgl.length = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
         sgl.lkey = cb->conn_buf_mr->lkey;
 
         size_t remote_offset = 0;
@@ -1007,6 +1009,16 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_use_uc <= 1, "Invalid use_uc");
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
+
+    //初始化wqe表
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    int val;
+    while(infile>>val){
+      traffic_size.push_back(val);
+    }
+    printf("traffic_size size:%d\n,traffic_size[0]:%d\n",traffic_size.size(),traffic_size[0]);
+
+
 
   size_t num_threads;
   if (FLAGS_is_client == 1) {
