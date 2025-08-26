@@ -3,7 +3,7 @@
         {
             "name": "Linux",
             "includePath": [
-                "/home/dell/zxm/rdma-core/build/include", 
+                "/root/zxm/rdma-core/build/include", 
                 "${workspaceFolder}/**/**/**",
                 "/usr/lib/gcc/x86_64-linux-gnu/9/include/**",
                 "${workspaceFolder}/"

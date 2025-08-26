@@ -22,6 +22,25 @@
                 "isDefault": true
             },
             "detail": "调试器生成的任务。"
+        },
+        {
+            "type": "cppbuild",
+            "label": "C/C++: g++ 编译当前文件", // 任务名称，后续调试会用到
+            "command": "g++", // 编译器路径（Windows下若MinGW配置正确，直接写g++即可）
+            "args": [
+                "-g", // 生成调试信息（必须加，否则无法调试）
+                "${file}", // 当前打开的文件（如test.cc，自动识别）
+                "-o", // 输出可执行文件
+                "${fileDirname}/${fileBasenameNoExtension}" // 可执行文件路径：当前目录/无后缀文件名（如test.exe或test）
+            ],
+            "options": {
+                "cwd": "${fileDirname}" // 编译工作目录：当前文件所在目录
+            },
+            "problemMatcher": ["$gcc"], // 捕获编译错误
+            "group": {
+                "kind": "build",
+                "isDefault": true // 按Ctrl+Shift+B时默认执行此任务
+            }
         }
     ],
     "version": "2.0.0"

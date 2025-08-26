@@ -13,6 +13,7 @@
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <cstdio>
+#include <fstream>
 #define CPU_FREQUENCY_HZ 2900000000.0
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
@@ -64,11 +65,7 @@ DEFINE_uint64(test_lat,0,"Test latency");
 DEFINE_uint64(use_srm,0,"Test SRM QPs");
 DEFINE_uint64(test_lat_thread,0,"Test latency thread");
 
-size_t traffic_size[]={
-    64, 635, 1206, 1778, 2349, 3270, 4000, 4285, 4570, 4860, 
-    5145, 5431, 5716, 6002, 6287, 6572, 6867, 7152, 7438, 7723,
-    8000, 10000, 13000, 16000, 21300, 26602, 32000, 64000, 256000, 2000000
-    };//Alistorage分
+std::vector<size_t> traffic_size;
 
 // size_t traffic_size[]={
 //     2, 2, 2, 2, 2, 3, 3, 5, 6, 10, 
@@ -80,6 +77,7 @@ uint32_t *wqe_table;
 FILE * log_file ;
 
 uint64_t seed_array[kAppNumServers+1];  
+static const int num_sched = 2;
 
 
 // 全局变量
@@ -98,7 +96,7 @@ struct user_table_info {
     size_t table_size;
 };
 
-#define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*6)  // 表大小（页对齐，4KB=1页）
+#define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*6*num_sched)  // 表大小（页对齐，4KB=1页）
 #define DEV_PATH "/dev/mlx5_table_bridge"
 static inline uint64_t rdtsc() {
   unsigned int lo, hi;
@@ -402,7 +400,12 @@ void run_server(thread_params_t* params) {
   }
 }
 
-
+// int sched_hash_ip(char addr[4], int n)
+// {
+//     // DEBUG_LOG("in sched_hash_ip\n");
+//     u32 hash = jhash(addr, 4, 0);
+//     return hash % n;
+// }
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -410,10 +413,10 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps =  6;
+  conn_config.num_qps =  12;
   if(FLAGS_test_lat_thread && srv_gid == kAppNumServers){
     //lat thread
-    conn_config.num_qps = 6;
+    conn_config.num_qps = 12;
   }
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
@@ -502,7 +505,7 @@ void run_server_srm(thread_params_t* params) {
   struct ibv_sge sgl;
   struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients*6] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppNumClients*6*num_sched] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
 
   struct timespec run_start, run_end;
@@ -518,11 +521,15 @@ void run_server_srm(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = seed_array[srv_gid];
+  uint64_t sched_seed = seed_array[srv_gid];
   size_t qp_cn,cn;
   qp_cn = cn = -1;
 
   size_t real_sz;
   double tot_sz = 0;
+  int sched_idx;
+  int group_idx;
+  int tot_qp_nums = (kAppNumServers+FLAGS_test_lat_thread)*6;//用户态qp单内核线程总数
 
   thread_barrier();
 
@@ -593,8 +600,11 @@ void run_server_srm(thread_params_t* params) {
       //size_t cn = hrd_fastrand(&seed) % kAppNumClients;
       cn = (cn + 1)%kAppNumClients;
 
+      sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
+      
+
       //real_sz = KB(4);
-      real_sz = traffic_size[hrd_fastrand(&seed) % 30];
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
       //real_sz = std::min(real_sz,KB(500));
 
@@ -602,24 +612,25 @@ void run_server_srm(thread_params_t* params) {
 
       //根据real_sz选择对应srm qp
       if(real_sz < KB(2)){
-        qp_cn = 0;
+        group_idx = 0;
       }
       else if(real_sz <KB(4)){
-        qp_cn = 1;
+        group_idx = 1;
       }
       else if(real_sz<KB(7)){
-        qp_cn = 2;
+        group_idx = 2;
       }
       else if(real_sz<KB(10)){
-        qp_cn = 3;
+        group_idx = 3;
       }
       else if(real_sz<KB(100)){
-        qp_cn = 4;
+        group_idx = 4;
       }
       else{
         //>100KB
-        qp_cn = 5;
+        group_idx = 5;
       }
+      qp_cn = group_idx * num_sched + sched_idx;
 
       
       //随机选应该poll哪个srm qp（<=4KB，4KB < <=10KB，>10KB）
@@ -656,7 +667,7 @@ void run_server_srm(thread_params_t* params) {
       wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
       wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
 
-      wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
+      //wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
       // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
       nb_tx[qp_cn]++;
       if(FLAGS_test_lat){
@@ -671,7 +682,8 @@ void run_server_srm(thread_params_t* params) {
       // printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
       //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
       //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
-      __atomic_fetch_add(wqe_table+qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
+      __atomic_fetch_add(wqe_table+group_idx*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid 
+                        + sched_idx * tot_qp_nums,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
 
       // fprintf(log_file,"当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
       //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
@@ -697,7 +709,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(2)){
+        if(rolling_iter>=KB(256)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -710,33 +722,37 @@ void run_server_srm(thread_params_t* params) {
         size_t window_i = nb_tx_tot % kAppWindowSize;  // Current window slot to use
       
 
-        real_sz = traffic_size[hrd_fastrand(&seed) % 30];
-        //real_sz = KB(1);
-
-        //real_sz = std::min(real_sz,KB(9));
   
+        cn = (cn + 1)%kAppNumClients;
+        sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
 
-        cn = 0;
+        //real_sz = KB(4);
+        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        //real_sz = std::min(real_sz,KB(500));
+
+
         //根据real_sz选择对应srm qp
         if(real_sz < KB(2)){
-          qp_cn = 0;
+          group_idx = 0;
         }
         else if(real_sz <KB(4)){
-          qp_cn = 1;
+          group_idx = 1;
         }
         else if(real_sz<KB(7)){
-          qp_cn = 2;
+          group_idx = 2;
         }
         else if(real_sz<KB(10)){
-          qp_cn = 3;
+          group_idx = 3;
         }
         else if(real_sz<KB(100)){
-          qp_cn = 4;
+          group_idx = 4;
         }
         else{
           //>100KB
-          qp_cn = 5;
+          group_idx = 5;
         }
+        qp_cn = group_idx * num_sched + sched_idx;
+       
 
 
         wr.opcode = opcode;
@@ -761,7 +777,7 @@ void run_server_srm(thread_params_t* params) {
         wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
         wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
 
-        wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
+        //wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
         // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
         nb_tx[qp_cn]++;
 
@@ -781,7 +797,8 @@ void run_server_srm(thread_params_t* params) {
         //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
         //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
 
-        __atomic_fetch_add(wqe_table+qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,1,__ATOMIC_SEQ_CST);
+        __atomic_fetch_add(wqe_table+group_idx*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid 
+                        + sched_idx * tot_qp_nums,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
         
         // ed_lat = rdtsc();
         // double e_cycles = (double)(ed_lat - st_lat);
@@ -1097,6 +1114,14 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_use_uc <= 1, "Invalid use_uc");
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
+
+  //初始化wqe表
+  std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+  int val;
+  while(infile>>val){
+    traffic_size.push_back(val);
+  }
+  printf("traffic_size size:%d\n,traffic_size[0]:%d\n",traffic_size.size(),traffic_size[0]);
 
   //mmap表
   int fd, ret;
