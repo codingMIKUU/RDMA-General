@@ -73,7 +73,7 @@ std::vector<size_t> traffic_size;
 //     167, 186, 233, 260, 325, 406, 508, 710, 1109, 96093
 //     };//Facebook_KVstorage
 
-uint32_t *wqe_table;
+uint32_t *wqe_table, *level_table;
 FILE * log_file ;
 
 uint64_t seed_array[kAppNumServers+1];  
@@ -94,9 +94,13 @@ int barrier_count = 0;                    // 到达线程墙的线程计数
 struct user_table_info {
     void *table_addr;
     size_t table_size;
+
+    void *level_table_addr;
+    size_t level_table_size;
 };
 
-#define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*6*num_sched)  // 表大小（页对齐，4KB=1页）
+#define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*4*num_sched)  // 表大小（页对齐，4KB=1页）
+#define LEVEL_TABLE_SIZE (sizeof(uint32_t)*4*num_sched)
 #define DEV_PATH "/dev/mlx5_table_bridge"
 static inline uint64_t rdtsc() {
   unsigned int lo, hi;
@@ -413,10 +417,10 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps =  12;
+  conn_config.num_qps =  4*num_sched;
   if(FLAGS_test_lat_thread && srv_gid == kAppNumServers){
     //lat thread
-    conn_config.num_qps = 12;
+    conn_config.num_qps = 4*num_sched;
   }
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
@@ -505,7 +509,7 @@ void run_server_srm(thread_params_t* params) {
   struct ibv_sge sgl;
   struct ibv_wc wc;
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients*6*num_sched] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppNumClients*4*num_sched] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
 
   struct timespec run_start, run_end;
@@ -529,7 +533,7 @@ void run_server_srm(thread_params_t* params) {
   double tot_sz = 0;
   int sched_idx;
   int group_idx;
-  int tot_qp_nums = (kAppNumServers+FLAGS_test_lat_thread)*6;//用户态qp单内核线程总数
+  int tot_qp_nums = (kAppNumServers+FLAGS_test_lat_thread)*4;//用户态qp单内核线程总数
 
   thread_barrier();
 
@@ -611,24 +615,18 @@ void run_server_srm(thread_params_t* params) {
       tot_sz+=real_sz;
 
       //根据real_sz选择对应srm qp
-      if(real_sz < KB(2)){
+      if(real_sz <KB(4)){
         group_idx = 0;
       }
-      else if(real_sz <KB(4)){
+      else if(real_sz<KB(10)){
         group_idx = 1;
       }
-      else if(real_sz<KB(7)){
-        group_idx = 2;
-      }
-      else if(real_sz<KB(10)){
-        group_idx = 3;
-      }
       else if(real_sz<KB(100)){
-        group_idx = 4;
+        group_idx = 2;
       }
       else{
         //>100KB
-        group_idx = 5;
+        group_idx = 3;
       }
       qp_cn = group_idx * num_sched + sched_idx;
 
@@ -685,6 +683,9 @@ void run_server_srm(thread_params_t* params) {
       __atomic_fetch_add(wqe_table+group_idx*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid 
                         + sched_idx * tot_qp_nums,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
 
+      uint32_t val_one = 1;
+      __atomic_store(&level_table[group_idx+sched_idx*4],&val_one,__ATOMIC_SEQ_CST);
+
       // fprintf(log_file,"当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
       //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
       //   wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
@@ -732,24 +733,18 @@ void run_server_srm(thread_params_t* params) {
 
 
         //根据real_sz选择对应srm qp
-        if(real_sz < KB(2)){
+        if(real_sz <KB(4)){
           group_idx = 0;
         }
-        else if(real_sz <KB(4)){
+        else if(real_sz<KB(10)){
           group_idx = 1;
         }
-        else if(real_sz<KB(7)){
-          group_idx = 2;
-        }
-        else if(real_sz<KB(10)){
-          group_idx = 3;
-        }
         else if(real_sz<KB(100)){
-          group_idx = 4;
+          group_idx = 2;
         }
         else{
           //>100KB
-          group_idx = 5;
+          group_idx = 3;
         }
         qp_cn = group_idx * num_sched + sched_idx;
        
@@ -1140,6 +1135,21 @@ int main(int argc, char* argv[]) {
       perror("mmap失败");
       return -1;
   }
+
+  void *l_table = mmap(
+    NULL,
+    LEVEL_TABLE_SIZE,
+    PROT_READ | PROT_WRITE,
+    MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+    -1,
+    0
+  );
+  if(l_table == MAP_FAILED){
+    perror("mmap失败");
+    munmap(table, TABLE_SIZE);
+    return -1;
+  }
+
   printf("用户态表创建成功：地址=%p，大小=%d字节\n", table, TABLE_SIZE);
 
   // 2. 初始化表数据
@@ -1148,22 +1158,32 @@ int main(int argc, char* argv[]) {
       wqe_table[i] = 0;
   }
 
+  level_table = (uint32_t *)l_table;
+  for(int i = 0;i < LEVEL_TABLE_SIZE / sizeof(uint32_t);i++){
+    level_table[i] = 0;
+  }
+
+
   // 3. 打开内核设备
   fd = open(DEV_PATH, O_RDWR);
   if (fd < 0) {
       perror("打开设备失败");
       munmap(table, TABLE_SIZE);
+      munmap(l_table, LEVEL_TABLE_SIZE);
       return -1;
   }
 
   // 4. 通过ioctl传递表信息给内核
   info.table_addr = table;
   info.table_size = TABLE_SIZE;
+  info.level_table_addr = l_table;
+  info.level_table_size = LEVEL_TABLE_SIZE;
   ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
   if (ret < 0) {
       perror("ioctl失败");
       close(fd);
       munmap(table, TABLE_SIZE);
+      munmap(l_table, LEVEL_TABLE_SIZE);
       return -1;
   }
 
@@ -1175,8 +1195,8 @@ int main(int argc, char* argv[]) {
   // }
 
 
-    //初始化随机数种子数组
-    generate_random_seeds(seed_array, kAppNumServers+1);
+  //初始化随机数种子数组
+  generate_random_seeds(seed_array, kAppNumServers+1);
 
 
   size_t num_threads;
@@ -1239,6 +1259,7 @@ int main(int argc, char* argv[]) {
 
   close(fd);
   munmap(table, TABLE_SIZE);
+  munmap(l_table, LEVEL_TABLE_SIZE);
 
 
   // fclose(log_file);
