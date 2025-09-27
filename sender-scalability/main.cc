@@ -73,7 +73,7 @@ std::vector<size_t> traffic_size;
 //     167, 186, 233, 260, 325, 406, 508, 710, 1109, 96093
 //     };//Facebook_KVstorage
 
-uint32_t *wqe_table, *level_table;
+uint32_t *wqe_table, *level_table,*idx_table;
 FILE * log_file ;
 
 uint64_t seed_array[kAppNumServers+1];  
@@ -97,6 +97,10 @@ struct user_table_info {
 
     void *level_table_addr;
     size_t level_table_size;
+
+    void *idx_table_addr;
+    size_t idx_table_size;
+
 };
 
 #define TABLE_SIZE (sizeof(uint32_t)*(kAppNumServers+FLAGS_test_lat_thread)*4*num_sched)  // 表大小（页对齐，4KB=1页）
@@ -234,6 +238,11 @@ void run_server(thread_params_t* params) {
   uint64_t seed = 0xdeadbeef;
   size_t cn,qp_cn;
   cn = qp_cn = -1;
+  int real_sz;
+  double tot_sz = 0;
+
+  uint64_t lat_st,lat_ed;
+  double elapsed_cycles,elapsed_time_us ;
   thread_barrier();
   while (1) {
     if(srv_gid != kAppNumServers){
@@ -242,31 +251,40 @@ void run_server(thread_params_t* params) {
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
         double tput = rolling_iter / msr_seconds;
+        double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
 
         clock_gettime(CLOCK_REALTIME, &run_end);
         double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
                             (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
         if (run_seconds >= FLAGS_run_time) {
           printf("main: Server %zu exiting.\n", srv_gid);
-          hrd_ctrl_blk_destroy(cb);
+          hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
 
         printf(
-            "main: Server %zu: %.2f ops. Total active QPs = %zu. "
+            "main: Server %zu: %.2f ops, %.2f Gbps. Total active QPs = %zu. "
             "Outstanding ops per thread (for READs) = %zu. "
             "Seconds = %.1f of %zu.\n",
-            srv_gid, tput, kAppNumServers * kAppNumClients, kAppWindowSize,
+            srv_gid, tput,tput_Gbps, kAppNumServers * kAppNumClients, kAppWindowSize,
             run_seconds, FLAGS_run_time);
 
         params->tput[srv_gid] = tput;
+        params->tput_Gbps[srv_gid] = tput_Gbps;
         if (srv_gid == 0) {
-          double tot = 0;
-          for (size_t i = 0; i < kAppNumServers; i++) tot += params->tput[i];
-          hrd_red_printf("Total tput = %.2f ops\n", tot);
+          double tot = 0,tot_Gbps = 0;
+          for (size_t i = 0; i < kAppNumServers; i++){
+            tot += params->tput[i];
+            tot_Gbps += params->tput_Gbps[i];
+          }
+          hrd_red_printf("Total tput = %.2f ops,%.2f Gbps\n", tot,tot_Gbps);
         }
 
+
+
+
         rolling_iter = 0;
+        tot_sz = 0;
         clock_gettime(CLOCK_REALTIME, &msr_start);
 
         if(FLAGS_test_lat){
@@ -308,12 +326,15 @@ void run_server(thread_params_t* params) {
       }
   
       //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+      real_sz =  traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      tot_sz += real_sz;
   
       sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-      sgl.length = FLAGS_size;
+      sgl.length = real_sz;
       sgl.lkey = cb->conn_buf_mr->lkey;
   
-      size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+      //size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+      size_t remote_offset = 0;
       wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
       wr.wr.rdma.rkey = clt_qp[cn]->rkey;
       // wr.wr.rdma.remote_addr = 0;
@@ -339,7 +360,7 @@ void run_server(thread_params_t* params) {
       }
     }
     else{
-      if(rolling_iter>=KB(32)){
+      if(rolling_iter>=KB(256)){
         double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(),lats.end());
         printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -371,12 +392,14 @@ void run_server(thread_params_t* params) {
       wr.send_flags = IBV_SEND_SIGNALED;
   
       //wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;      
+      real_sz =  traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
   
       sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
-      sgl.length = 4096;
+      sgl.length = real_sz;
       sgl.lkey = cb->conn_buf_mr->lkey;
   
-      size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+      //size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize - FLAGS_size);
+      size_t remote_offset = 0;
       wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
       wr.wr.rdma.rkey = clt_qp[cn]->rkey;
       // wr.wr.rdma.remote_addr = 0;
@@ -384,7 +407,7 @@ void run_server(thread_params_t* params) {
       //wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
       nb_tx[qp_cn]++;
 
-      clock_gettime(CLOCK_REALTIME, &lat_start);
+      lat_st = rdtsc();
       
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
       rt_assert(ret == 0);
@@ -395,10 +418,14 @@ void run_server(thread_params_t* params) {
         hrd_ctrl_blk_destroy(cb);
         return;
       }
-      clock_gettime(CLOCK_REALTIME, &lat_end);
-      double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
-                          (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
-      lats.push_back(lat_sec);
+
+
+      lat_ed = rdtsc();
+      if(sgl.length <= KB(10)){
+        elapsed_cycles = (double)(lat_ed - lat_st);
+        elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+        lats.push_back(elapsed_time_us);
+      }
       
     }
   }
@@ -607,8 +634,7 @@ void run_server_srm(thread_params_t* params) {
       sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
       
 
-      //real_sz = KB(4);
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = traffic_size[hrd_fastrand(&seed)% traffic_size.size()];
 
       //real_sz = std::min(real_sz,KB(500));
 
@@ -683,8 +709,13 @@ void run_server_srm(thread_params_t* params) {
       __atomic_fetch_add(wqe_table+group_idx*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid 
                         + sched_idx * tot_qp_nums,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
 
-      uint32_t val_one = 1;
-      __atomic_store(&level_table[group_idx+sched_idx*4],&val_one,__ATOMIC_SEQ_CST);
+      uint32_t val = srv_gid;
+      __atomic_store(&idx_table[group_idx + sched_idx*4],&val,__ATOMIC_SEQ_CST);
+
+      // // 插入释放屏障：确保c的更新先于b的更新被可见
+      // __atomic_thread_fence(__ATOMIC_RELEASE);
+
+      __atomic_fetch_add(&level_table[group_idx+sched_idx*4],1,__ATOMIC_SEQ_CST);
 
       // fprintf(log_file,"当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
       //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
@@ -727,8 +758,8 @@ void run_server_srm(thread_params_t* params) {
         cn = (cn + 1)%kAppNumClients;
         sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
 
-        //real_sz = KB(4);
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
         //real_sz = std::min(real_sz,KB(500));
 
 
@@ -794,6 +825,13 @@ void run_server_srm(thread_params_t* params) {
 
         __atomic_fetch_add(wqe_table+group_idx*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid 
                         + sched_idx * tot_qp_nums,1,__ATOMIC_SEQ_CST); // 使用原子操作存储imm值
+
+        uint32_t val = srv_gid;
+        __atomic_store(&idx_table[group_idx + sched_idx*4],&val,__ATOMIC_SEQ_CST);
+
+        __atomic_fetch_add(&level_table[group_idx+sched_idx*4],1,__ATOMIC_SEQ_CST);
+
+        
         
         // ed_lat = rdtsc();
         // double e_cycles = (double)(ed_lat - st_lat);
@@ -1150,6 +1188,22 @@ int main(int argc, char* argv[]) {
     return -1;
   }
 
+  void *_idx_table = mmap(
+    NULL,
+    LEVEL_TABLE_SIZE,
+    PROT_READ | PROT_WRITE,
+    MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+    -1,
+    0
+  );
+
+  if(_idx_table == MAP_FAILED){
+    perror("mmap失败");
+    munmap(table, TABLE_SIZE);
+    munmap(l_table, LEVEL_TABLE_SIZE);
+    return -1;
+  }
+
   printf("用户态表创建成功：地址=%p，大小=%d字节\n", table, TABLE_SIZE);
 
   // 2. 初始化表数据
@@ -1163,6 +1217,12 @@ int main(int argc, char* argv[]) {
     level_table[i] = 0;
   }
 
+  idx_table = (uint32_t *)_idx_table;
+
+  for(int i = 0;i < LEVEL_TABLE_SIZE / sizeof(uint32_t);i++){
+    idx_table[i] = 0;
+  }
+
 
   // 3. 打开内核设备
   fd = open(DEV_PATH, O_RDWR);
@@ -1170,6 +1230,7 @@ int main(int argc, char* argv[]) {
       perror("打开设备失败");
       munmap(table, TABLE_SIZE);
       munmap(l_table, LEVEL_TABLE_SIZE);
+      munmap(_idx_table, LEVEL_TABLE_SIZE);
       return -1;
   }
 
@@ -1178,12 +1239,15 @@ int main(int argc, char* argv[]) {
   info.table_size = TABLE_SIZE;
   info.level_table_addr = l_table;
   info.level_table_size = LEVEL_TABLE_SIZE;
+  info.idx_table_addr = _idx_table;
+  info.idx_table_size = LEVEL_TABLE_SIZE;
   ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
   if (ret < 0) {
       perror("ioctl失败");
       close(fd);
       munmap(table, TABLE_SIZE);
       munmap(l_table, LEVEL_TABLE_SIZE);
+      munmap(_idx_table, LEVEL_TABLE_SIZE);
       return -1;
   }
 
@@ -1260,6 +1324,7 @@ int main(int argc, char* argv[]) {
   close(fd);
   munmap(table, TABLE_SIZE);
   munmap(l_table, LEVEL_TABLE_SIZE);
+  munmap(_idx_table, LEVEL_TABLE_SIZE);
 
 
   // fclose(log_file);
