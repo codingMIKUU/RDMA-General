@@ -631,7 +631,7 @@ void run_server_srm(thread_params_t* params) {
       //size_t cn = hrd_fastrand(&seed) % kAppNumClients;
       cn = (cn + 1)%kAppNumClients;
 
-      sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
+      sched_idx = 0;//两个内核调度器
       
 
       real_sz = traffic_size[hrd_fastrand(&seed)% traffic_size.size()];
@@ -756,7 +756,7 @@ void run_server_srm(thread_params_t* params) {
 
   
         cn = (cn + 1)%kAppNumClients;
-        sched_idx = hrd_fastrand(&sched_seed) % num_sched;//两个内核调度器
+        sched_idx = 0;//两个内核调度器
 
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
