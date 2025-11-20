@@ -93,6 +93,7 @@ struct hrd_qp_attr_t {
 struct hrd_conn_config_t {
   // Required params
   size_t num_qps = 0;  // num_qps > 0 is used as a validity check
+  size_t num_srqs = 0;
   bool use_uc;
   bool use_xrc;
   bool is_client;
@@ -102,6 +103,8 @@ struct hrd_conn_config_t {
   int buf_shm_key;
   int xrcd_fd;
   int rnum_threads;
+
+  int kqp_num_per_thread;
 
 
   // Optional params with their default values
@@ -259,7 +262,7 @@ void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
 
 // Publish the nth datagram queue pair from this cb with this name
 void hrd_publish_dgram_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
-void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
+void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t qp_idx, size_t srq_idx, const char* qp_name);
 
 struct hrd_qp_attr_t* hrd_get_published_qp(const char* qp_name);
 

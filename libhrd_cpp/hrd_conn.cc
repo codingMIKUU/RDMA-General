@@ -3,6 +3,12 @@
 // If @prealloc_conn_buf != nullptr, @conn_buf_size is the size of the
 // preallocated buffer. If @prealloc_conn_buf == nullptr, @conn_buf_size is the
 // size of the new buffer to create.
+
+/* TODO LIST
+* destroy时统一一下数量
+* new的时候，边界处理一下qp_num为0的情况 
+* 接收端和发送端的qp个数需要检查
+*/
 struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
@@ -412,15 +418,14 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
 
   // Create connected QPs and transition them to RTS.
   // Create and register connected QP RDMA buffer.
-  if(!cb->conn_config.is_client)
+  if(cb->conn_config.num_qps >= 1){
     cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps];
-  if(cb->conn_config.is_client){
-    cb->conn_cq = new ibv_cq*[1];
+   
   }
-  else
-    cb->conn_cq = new ibv_cq*[cb->conn_config.num_qps];
-  if(cb->conn_config.is_client)
-    cb->srq = new ibv_srq*[cb->conn_config.rnum_threads];
+  cb->conn_cq = new ibv_cq*[1];
+  
+  cb->srq = new ibv_srq*[cb->conn_config.num_srqs];
+
   hrd_create_conn_qps_srm(cb);
   // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
   if (conn_config->prealloc_buf == nullptr) {
@@ -581,26 +586,18 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
 
 
   if(cb->conn_config.is_client){
-    for(int i=0;i<cb->conn_config.rnum_threads;i++)
+    for(int i=0;i<cb->conn_config.num_srqs;i++)
       rt_assert(ibv_destroy_srq(cb->srq[i])==0,"Failed to destroy srq");
   }
 
-  if(!cb->conn_config.is_client){
-    for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
+  for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
 
-      rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
-                "Failed to destroy connected QP");
-      rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
-                "Failed to destroy connected CQ");
-    }
+    rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
+              "Failed to destroy connected QP");
   }
-  else{
-    for (size_t i = 0; i < 1; i++) {
 
-      rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
-                "Failed to destroy connected CQ");
-    }
-  }
+  rt_assert(ibv_destroy_cq(cb->conn_cq[0]) == 0,
+            "Failed to destroy connected CQ");
 
 
 
@@ -637,10 +634,10 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
     rt_assert(ibv_close_device(cb->resolve.ib_ctx) == 0,
               "Failed to close device");
   }
-  //Destroy ah
-  for(int i=0;i<cb->conn_config.num_qps;i++){
-    rt_assert(ibv_destroy_ah(cb->ahs[i]),"Failed to destroy ah");
-  }
+  // //Destroy ah
+  // for(int i=0;i<cb->conn_config.num_qps;i++){
+  //   rt_assert(ibv_destroy_ah(cb->ahs[i]),"Failed to destroy ah");
+  // }
 
   hrd_red_printf("HRD: Control block %d destroyed.\n", cb->local_hid);
   return 0;
@@ -955,19 +952,21 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
 #endif
   }
 }
+
+
 void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
   assert(cb->pd != nullptr && cb->resolve.ib_ctx != nullptr);
   //assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
 
-  if(cb->conn_config.is_client){
-
-    //CQ不需要PD
-    cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
-      nullptr, nullptr, 0);
+  cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+                                   nullptr, nullptr, 0);
     // We sometimes set Mellanox env variables for hugepage-backed queues.
     rt_assert(cb->conn_cq[0] != nullptr,
-    "Failed to create conn CQ. Check hugepages and SHM limits?");
+              "Failed to create conn CQ. Check hugepages and SHM limits?");
+
+
+  if(cb->conn_config.is_client){
 
     //Create srq
     ibv_srq_init_attr_ex srq_init_attr;
@@ -976,26 +975,18 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
                               IBV_SRQ_INIT_ATTR_PD;
     srq_init_attr.srq_type = IBV_SRQT_XRC;
     srq_init_attr.xrcd = cb->xrcd;
-    srq_init_attr.cq = cb->conn_cq[0];
     srq_init_attr.pd = cb->pd;
     srq_init_attr.attr.max_sge = 1;
     srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-    for(size_t i = 0;i<cb->conn_config.rnum_threads;i++){
+    srq_init_attr.cq = cb->conn_cq[0];
+    for(size_t i = 0;i<cb->conn_config.num_srqs;i++){
+      
       cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
       rt_assert(cb->srq != nullptr,"Failed to Create srq");
     }
   
   }
-  else{
-    for(int i=0;i<cb->conn_config.num_qps;i++){
-      //CQ不需要PD
-      cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
-                                     nullptr, nullptr, 0);
-      // We sometimes set Mellanox env variables for hugepage-backed queues.
-      rt_assert(cb->conn_cq[i] != nullptr,
-                "Failed to create conn CQ. Check hugepages and SHM limits?");
-    }
-  }
+
 #if (kHrdMlx5Atomics == false)
   for(int i = 0;i<cb->conn_config.num_qps;i++){
     struct ibv_qp_init_attr_ex create_attr;
@@ -1004,10 +995,16 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     create_attr.qp_type = IBV_QPT_SRM;
     create_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
     create_attr.pd = cb->pd;
-    create_attr.send_cq = cb->conn_cq[i];
+    create_attr.send_cq = cb->conn_cq[0];
     create_attr.cap.max_send_wr = cb->conn_config.sq_depth;
     create_attr.cap.max_send_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
+
+    if(cb->conn_config.is_client){
+      create_attr.xrcd = cb->xrcd;
+    }
+    create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
+    create_attr.rnode_num = cb->conn_config.kqp_num_per_thread;
     
     
 
@@ -1025,6 +1022,12 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
                                     : IBV_ACCESS_REMOTE_WRITE |
                                           IBV_ACCESS_REMOTE_READ |
                                           IBV_ACCESS_REMOTE_ATOMIC;
+     if (ibv_modify_qp(cb->conn_qp[i], &init_attr,
+                      IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT |
+                          IBV_QP_ACCESS_FLAGS)) {
+      fprintf(stderr, "Failed to modify conn QP to INIT\n");
+      exit(-1);
+    }
   }
 
 #else
@@ -1197,37 +1200,65 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
 
 int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
                     hrd_qp_attr_t* remote_qp_attr) {
-  printf("Connect qp srm\n");
-  ibv_ah_attr attr;
-  ibv_qp_info local_qp_info;
-  local_qp_info.gid.global.interface_id = cb->resolve.gid.global.interface_id;
-  local_qp_info.gid.global.subnet_prefix = cb->resolve.gid.global.subnet_prefix;
-  // memcpy(local_qp_info.rconn_server,"127.0.0.1",sizeof(local_qp_info.rconn_server));
-  memset(&attr,0,sizeof (ibv_ah_attr));
-  attr.is_global = 1;
-  attr.dlid = 0;
-  attr.sl = 0;
-  attr.src_path_bits = 0;
-  attr.port_num = cb->resolve.dev_port_id;
-  attr.grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
-  attr.grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
-  attr.grh.sgid_index = 3;
-  attr.grh.hop_limit = 1;
-  attr.check_xrc = 1;
+  struct ibv_qp_attr conn_attr;
+  memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
+  conn_attr.qp_state = IBV_QPS_RTR;
+  conn_attr.path_mtu = IBV_MTU_1024;
+  conn_attr.dest_qp_num = remote_qp_attr->qpn;
+  conn_attr.rq_psn = kHrdDefaultPSN;
 
-  ibv_xrcd *xrcd = nullptr;
-  if(cb->conn_config.is_client)
-    xrcd = cb->xrcd;
+  conn_attr.ah_attr.is_global = kRoCE ? 1 : 0;
+  conn_attr.ah_attr.dlid = kRoCE ? 0 : remote_qp_attr->lid;
+  conn_attr.ah_attr.sl = 0;
+  conn_attr.ah_attr.src_path_bits = 0;
+  conn_attr.ah_attr.port_num = cb->resolve.dev_port_id;  // Local port!
 
-  cb->ahs[i] = ibv_create_ah(cb->pd,&attr,xrcd,&local_qp_info,NULL);
-  if(cb->ahs[i]==nullptr){
-    fprintf(stderr,"Failed to create ah in RDMA-bench\n");
-    return -1;
-    
+  if (kRoCE) {
+    auto& grh = conn_attr.ah_attr.grh;
+    grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
+    grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
+
+    grh.sgid_index = 3;
+    grh.hop_limit = 1;
+  }
+
+  int rtr_flags = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
+                  IBV_QP_RQ_PSN;
+
+  if (!cb->conn_config.use_uc) {
+    conn_attr.max_dest_rd_atomic = cb->conn_config.max_rd_atomic;
+    conn_attr.min_rnr_timer = 12;
+    rtr_flags |= IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
+  }
+
+  if (ibv_modify_qp(cb->conn_qp[i], &conn_attr, rtr_flags)) {
+    fprintf(stderr, "HRD: Failed to modify QP to RTR: %s\n", strerror(errno));
+    assert(false);
+  }
+
+  memset(&conn_attr, 0, sizeof(conn_attr));
+  conn_attr.qp_state = IBV_QPS_RTS;
+  conn_attr.sq_psn = kHrdDefaultPSN;
+
+  int rts_flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
+
+  if (!cb->conn_config.use_uc) {
+    conn_attr.timeout = 14;
+    conn_attr.retry_cnt = 7;
+    conn_attr.rnr_retry = 7;
+    conn_attr.max_rd_atomic = cb->conn_config.max_rd_atomic;
+    conn_attr.max_dest_rd_atomic = cb->conn_config.max_rd_atomic;
+    rts_flags |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
+                 IBV_QP_MAX_QP_RD_ATOMIC;
+  }
+
+  if (ibv_modify_qp(cb->conn_qp[i], &conn_attr, rts_flags)) {
+    fprintf(stderr, "HRD: Failed to modify QP to RTS: %s\n", strerror(errno));
+    assert(false);
   }
   return 0;
 }
-void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
+void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t qp_idx, size_t srq_idx, const char* qp_name) {
   assert(strlen(qp_name) < kHrdQPNameSize - 1);
   assert(strstr(qp_name, kHrdReservedNamePrefix) == nullptr);
 
@@ -1237,14 +1268,15 @@ void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) 
   hrd_qp_attr_t qp_attr;
   strcpy(qp_attr.name, qp_name);
   qp_attr.lid = cb->resolve.port_lid;
-  qp_attr.qpn = 0;
+  if(qp_idx >=0)
+    qp_attr.qpn = cb->conn_qp[qp_idx]->qp_num;
   if (kRoCE) qp_attr.gid = cb->resolve.gid;
 
   qp_attr.buf_addr = reinterpret_cast<uint64_t>(cb->conn_buf);
   qp_attr.buf_size = cb->conn_config.buf_size;
   qp_attr.rkey = cb->conn_buf_mr->rkey;
-  if(cb->conn_config.is_client){
-    int ret = ibv_get_srq_num(cb->srq[n],&(qp_attr.srqn));
+  if(cb->conn_config.is_client && srq_idx>=0){
+    int ret = ibv_get_srq_num(cb->srq[srq_idx],&(qp_attr.srqn));
     rt_assert(ret==0,"Failed to get srqn.");
   }
   hrd_publish(qp_attr.name, &qp_attr, sizeof(hrd_qp_attr_t));
