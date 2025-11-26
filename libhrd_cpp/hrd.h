@@ -262,7 +262,7 @@ void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
 
 // Publish the nth datagram queue pair from this cb with this name
 void hrd_publish_dgram_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name);
-void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t qp_idx, size_t srq_idx, const char* qp_name);
+void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb,int qp_idx, int srq_idx, const char* qp_name);
 
 struct hrd_qp_attr_t* hrd_get_published_qp(const char* qp_name);
 

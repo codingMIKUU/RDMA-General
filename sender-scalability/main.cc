@@ -110,7 +110,7 @@ struct user_table_info {
 
   size_t xrc_qp_num_per_srm;
 };
-#define KERNEL_QP_NUM 2048  // 真实内核qp数量需要KERNEL_QP_NUM*2
+#define KERNEL_QP_NUM  4096
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -144,6 +144,7 @@ const static int golden_step =
 uint32_t *wqe_table, *level_table;
 
 struct xrc_table_entry (*xrc_table)[NUM_SCHED][KQP_NUM_PER_THREAD];
+uint64_t xrc_tot_bytes[kAppNumServers + 1][NUM_SCHED][KQP_NUM_PER_THREAD];
 
 int kqp_idx_arr[kAppNumServers + 1][KQP_NUM_PER_THREAD];
 static inline uint64_t rdtsc() {
@@ -164,6 +165,23 @@ void thread_barrier() {
     // 否则，当前线程等待
     barrier_cv.wait(lock, [] {
       return barrier_count == kAppNumServers + FLAGS_test_lat_thread;
+    });
+  }
+}
+
+void clt_thread_barrier() {
+  std::unique_lock<std::mutex> lock(barrier_mutex);
+  barrier_count++;
+  // 通知下一个线程开始执行
+  barrier_cv.notify_all();
+
+  if (barrier_count == kAppNumClients + FLAGS_test_lat_thread) {
+    // 如果所有线程都到达，通知所有线程继续
+    barrier_cv.notify_all();
+  } else {
+    // 否则，当前线程等待
+    barrier_cv.wait(lock, [] {
+      return barrier_count == kAppNumClients + FLAGS_test_lat_thread;
     });
   }
 }
@@ -738,12 +756,14 @@ void run_server_srm(thread_params_t* params) {
           hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
+        // if(ret>0)
+        //   printf("poll completions:%d\n",ret);
         nxt_post_wqe_nums += ret;
       }
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= KB(512)) {
+        if (rolling_iter >= KB(64)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -816,7 +836,7 @@ void run_server_srm(thread_params_t* params) {
 
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
-        // real_sz = std::min(real_sz,KB(500));
+        //real_sz = KB(5);
 
         tot_sz += real_sz;
 
@@ -871,7 +891,11 @@ void run_server_srm(thread_params_t* params) {
         // printf("ready to post send, rolling_iter%d\n",rolling_iter);
 
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
-        __atomic_store_n(&xrc_table[srv_gid][qp_cn][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+        if(group_idx == 0){
+          xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
+          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
+          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+        }
         
 
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
@@ -960,9 +984,10 @@ void run_server_srm(thread_params_t* params) {
 
         // printf("finish to post send, rolling_iter%d\n",rolling_iter);
       }
+      nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(32)) {
+      if (rolling_iter >= KB(256)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1041,6 +1066,11 @@ void run_server_srm(thread_params_t* params) {
       // st_lat = rdtsc();
 
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+      if(group_idx == 0){
+        xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
+        __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
+        __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+      }
       // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
       //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
       //    qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
@@ -1119,7 +1149,7 @@ void run_server_srm(thread_params_t* params) {
       rt_assert(ret == 0);
       rolling_iter++;
 
-      ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, wc);
+      ret = hrd_poll_cq_ret(cb->conn_cq[0], 1, wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy_srm(cb);
         return;
@@ -1279,12 +1309,14 @@ void run_client_srm(thread_params_t* params) {
   param.sched_priority = sched_get_priority_max(SCHED_FIFO);
   pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
 
+
+
   size_t num_threads =
       kAppNumClients / kAppNumClientMachines + (FLAGS_test_lat_thread);
 
   size_t clt_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : clt_gid % 2;
-  int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
+  int shm_key = kAppBaseSHMKey + clt_gid % num_threads + kAppNumServers + 1;
 
   hrd_conn_config_t conn_config;
   //xrcd fd
@@ -1296,6 +1328,7 @@ void run_client_srm(thread_params_t* params) {
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid % num_threads == 0);
+  conn_config.kqp_num_per_thread = KQP_NUM_PER_THREAD;
   
   if (clt_gid == kAppNumClients) {
     conn_config.rnum_threads = 1;
@@ -1313,10 +1346,19 @@ void run_client_srm(thread_params_t* params) {
   else
     conn_config.num_srqs = 1;
 
+  {
+    // 等待逻辑
+    std::unique_lock<std::mutex> lock(barrier_mutex);
+    // 等待条件满足（等待时会释放锁，被唤醒后重新获取锁）
+    barrier_cv.wait(lock, [&]() { return barrier_count == clt_gid; });
+  }
+
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
   cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,
                              conn_config.is_client, nullptr, nullptr);
+  
+  clt_thread_barrier();
   // Set to zero value so the server can detect WRITE completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
@@ -1343,7 +1385,8 @@ void run_client_srm(thread_params_t* params) {
               srv_qp->rkey);
 
         printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-        // hrd_connect_qp_srm(cb, i, srv_qp);
+        if(fst_client_t)
+          hrd_connect_qp_srm(cb, i*NUM_SCHED*4+j, srv_qp);
 
         char clt_qp_name[kHrdQPNameSize];
         sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, i, j);
@@ -1372,7 +1415,7 @@ void run_client_srm(thread_params_t* params) {
               srv_qp->rkey);
 
         printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-        // hrd_connect_qp_srm(cb, i, srv_qp);
+        hrd_connect_qp_srm(cb, i*NUM_SCHED*4+j, srv_qp);
 
         char clt_qp_name[kHrdQPNameSize];
         sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, kAppNumServers,j);

@@ -1258,7 +1258,7 @@ int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
   }
   return 0;
 }
-void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb, size_t qp_idx, size_t srq_idx, const char* qp_name) {
+void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb,int qp_idx, int srq_idx, const char* qp_name) {
   assert(strlen(qp_name) < kHrdQPNameSize - 1);
   assert(strstr(qp_name, kHrdReservedNamePrefix) == nullptr);
 
