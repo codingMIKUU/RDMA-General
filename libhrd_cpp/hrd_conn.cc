@@ -387,17 +387,11 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
 
 
   // Resolve the port into cb->resolve
-  if(is_clt)
-    hrd_resolve_port_index(cb, port_index);
-  else 
-    memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
+  hrd_resolve_port_index(cb, port_index);
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
-  if(is_clt){
-    cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
-  }
-  else{
-    cb->pd = srm_pd;
-  }
+  cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+  
+
   //server -> client，client端建立处理XRCD
   if(cb->conn_config.is_client){
     //Create xrcd

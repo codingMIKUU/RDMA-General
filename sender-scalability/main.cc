@@ -16,6 +16,7 @@
 #include <vector>
 #include <cmath>
 
+
 #include "libhrd_cpp/hrd.h"
 #define CPU_FREQUENCY_HZ 2900000000.0
 static constexpr size_t kAppBufSize = MB(2);
@@ -756,6 +757,12 @@ void run_server_srm(thread_params_t* params) {
           hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
+        if(ret > 0){
+          if(wc[0].status != IBV_WC_SUCCESS){
+            printf("poll cq error status:%d\n",wc[0].status);
+            rt_assert(false);
+          }
+        }
         // if(ret>0)
         //   printf("poll completions:%d\n",ret);
         nxt_post_wqe_nums += ret;
@@ -763,7 +770,7 @@ void run_server_srm(thread_params_t* params) {
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= KB(64)) {
+        if (rolling_iter >= KB(512)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -969,7 +976,7 @@ void run_server_srm(thread_params_t* params) {
             1, __ATOMIC_SEQ_CST);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
-        // __atomic_thread_fence(__ATOMIC_RELEASE);
+        // __atomic_thread_fence(_file);
 
         __atomic_fetch_add(&level_table[group_idx + sched_idx * 4], 1,
                             __ATOMIC_SEQ_CST);
@@ -987,7 +994,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(256)) {
+      if (rolling_iter >= KB(16)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1154,11 +1161,19 @@ void run_server_srm(thread_params_t* params) {
         hrd_ctrl_blk_destroy_srm(cb);
         return;
       }
+      
+      //uint64_t lat_mid = __atomic_load_n(wr.cycles,__ATOMIC_SEQ_CST);
       lat_ed = rdtsc();
       if (sgl.length <= KB(10)) {
         elapsed_cycles = (double)(lat_ed - lat_st);
         elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
         lats.push_back(elapsed_time_us);
+
+        // double el_cyc_0 = (double)(lat_ed - lat_mid),el_cyc_1 = (double)(lat_mid - lat_st);
+        // double el_time_0 = (el_cyc_0 / CPU_FREQUENCY_HZ) * 1000000.0,el_time_1 = (el_cyc_1 / CPU_FREQUENCY_HZ) * 1000000.0;
+        // fprintf(log_file,"level:%d, 调度器idx:%d, xrc qp idx:%d, 总延时: %.2f us, doorbell后到完成延时: %.2f us, 发送前到doorbell后延时: %.2f us, size:%d bytes\n",
+        //         group_idx, sched_idx, kqp_idx, elapsed_time_us,el_time_0,el_time_1,sgl.length);
+        // fflush(log_file);
       }
       // clock_gettime(CLOCK_REALTIME, &lat_end);
       // double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
@@ -1599,7 +1614,9 @@ int main(int argc, char* argv[]) {
     // 初始化kqp_idx_arr表
     memset(kqp_idx_arr, -1, sizeof(kqp_idx_arr));
 
-    // log_file = fopen("log.txt", "w");
+    // char filename[64] ;
+    // sprintf(filename, "log_%d.txt",KERNEL_QP_NUM);
+    // log_file = fopen(filename, "w");
     // if(log_file == NULL){
     //   perror("fopen失败");
     //   return -1;
@@ -1633,12 +1650,12 @@ int main(int argc, char* argv[]) {
   // auto* tput = new double[num_threads];
   double tput[num_threads], tput_Gbps[num_threads];
 
-  if (FLAGS_use_srm && !FLAGS_is_client) {
-    srm_cb = new hrd_ctrl_blk_t();
-    memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb, 0);
-    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
-  }
+  // if (FLAGS_use_srm && !FLAGS_is_client) {
+  //   srm_cb = new hrd_ctrl_blk_t();
+  //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+  //   hrd_resolve_port_index(srm_cb, 0);
+  //   srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+  // }
   for (size_t i = 0; i < num_threads; i++) {
     if (FLAGS_is_client == 1) {
       param_arr[i].id = (FLAGS_machine_id * num_threads) + i;
@@ -1661,10 +1678,10 @@ int main(int argc, char* argv[]) {
   }
 
   for (auto& t : thread_arr) t.join();
-  if (FLAGS_use_srm) {
-    ibv_dealloc_pd(srm_pd);
-    ibv_close_device(srm_cb->resolve.ib_ctx);
-  }
+  // if (FLAGS_use_srm) {
+  //   ibv_dealloc_pd(srm_pd);
+  //   ibv_close_device(srm_cb->resolve.ib_ctx);
+  // }
 
 
   if(!FLAGS_is_client){
