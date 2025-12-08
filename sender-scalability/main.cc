@@ -41,6 +41,7 @@ static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1024;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppLatBatch = 4;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -688,7 +689,8 @@ void run_server_srm(thread_params_t* params) {
   thread_barrier();
 
 
-  int nxt_post_wqe_nums = kAppUnsigBatch;
+  int nxt_post_wqe_nums = srv_gid == kAppNumServers ? kAppLatBatch: kAppUnsigBatch;
+  int lat_st_head = 0,lat_st_tail = 0;
   while (1) {
     if (srv_gid != kAppNumServers) {
       if (rolling_iter >= KB(512)) {
@@ -841,9 +843,12 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        // real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        // if(real_sz < KB(4)){
+        //   real_sz =KB(4);
+        // }
+        real_sz = KB(4);
 
-        //real_sz = KB(5);
 
         tot_sz += real_sz;
 
@@ -1006,179 +1011,195 @@ void run_server_srm(thread_params_t* params) {
         lats.clear();
         rolling_iter = 0;
       }
+      
 
       size_t window_i =
           nb_tx_tot % kAppWindowSize;  // Current window slot to use
 
-      cn = (cn + 1) % kAppNumClients;
-      sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 两个内核调度器
+      
+      
+      for(int post_wqe_i = 0; post_wqe_i < nxt_post_wqe_nums; post_wqe_i++){
+        cn = (cn + 1) % kAppNumClients;
+        sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 两个内核调度器
 
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      // real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      // real_sz = std::min(real_sz,KB(500));
+        
+      //  real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      //  if(real_sz >= KB(10))
+      //   real_sz = KB(1);
 
-      // 根据real_sz选择对应srm qp
-      if (real_sz < KB(4)) {
-        group_idx = 0;
-      } else if (real_sz < KB(10)) {
-        group_idx = 1;
-      } else if (real_sz < KB(100)) {
-        group_idx = 2;
-      } else {
-        //>100KB
-        group_idx = 3;
+      real_sz = KB(1);
+
+        // 根据real_sz选择对应srm qp
+        if (real_sz < KB(4)) {
+          group_idx = 0;
+        } else if (real_sz < KB(10)) {
+          group_idx = 1;
+        } else if (real_sz < KB(100)) {
+          group_idx = 2;
+        } else {
+          //>100KB
+          group_idx = 3;
+        }
+        qp_cn = group_idx * NUM_SCHED + sched_idx;
+
+        wr.opcode = opcode;
+        wr.num_sge = 1;
+        wr.next = nullptr;
+        wr.sg_list = &sgl;
+
+        wr.send_flags = IBV_SEND_SIGNALED;
+
+        sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[0]);
+        sgl.length = real_sz;
+        sgl.lkey = cb->conn_buf_mr->lkey;
+
+        size_t remote_offset = 0;
+        // size_t remote_offset = rolling_iter;
+        wr.wr.rdma.remote_addr = clt_qp[cn][qp_cn]->buf_addr + remote_offset;
+        // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
+        // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
+        wr.wr.rdma.rkey = clt_qp[cn][qp_cn]->rkey;
+        wr.qp_type.srm.remote_srqn = clt_qp[cn][qp_cn]->srqn;
+        wr.qp_type.srm.remote_gid.global.interface_id =
+            clt_qp[cn][qp_cn]->gid.global.interface_id;
+        wr.qp_type.srm.remote_gid.global.subnet_prefix =
+            clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
+
+        uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
+        uint32_t kqp_idx = 0;
+            // kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
+        *tmp = (uint16_t)kqp_idx ;
+
+        // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
+        //  printf("interface_id:0x%llx,
+        //  subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
+        nb_tx[qp_cn]++;
+
+        // clock_gettime(CLOCK_REALTIME, &lat_start);
+
+
+
+        // printf("ready to post send, rolling_iter%d\n",rolling_iter);
+
+        // uint64_t st_lat,ed_lat;
+        // st_lat = rdtsc();
+        if(post_wqe_i == 0)
+          lat_st = rdtsc();
+
+        int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+        if(group_idx == 0){
+          xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
+          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
+          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+        }
+        // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
+        //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
+        //    qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
+        //    wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
+
+        // if(group_idx == 0){
+
+        //   int& cur_post = idx_table_cur_post[srv_gid][sched_idx];
+        //   for (;; cur_post = (cur_post + 1) % IDX_TABLE_ENTRY_NUM) {
+        //     if (index_table[srv_gid][sched_idx][cur_post].valid == 0) {
+        //       // 填入该位置
+        //       index_table[srv_gid][sched_idx][cur_post]
+        //           .wqe_idx = wr.wr_id;  
+
+        //       break;
+        //     }
+        //   }
+        //   // 索引表和哈希表只用于0~4KB的聚合
+        //   bool hash_ok = false;
+        //   int hash_val = sched_hash_ip((char*)&wr.qp_type.srm.remote_gid.raw[12],
+        //                                 HASH_TABLE_KEY_NUM);
+
+        //   for (int i = 0; i < HASH_TABLE_KEY_NUM; i++) {
+        //     int key = hash_next_key(hash_val, i, HASH_TABLE_KEY_NUM);
+        //     struct hash_table_entry& entry0 =
+        //         hash_table[srv_gid][sched_idx]
+        //                   [key * HASH_TABLE_ENTRY_NUM_PER_BUCKET];
+        //     if (entry0.valid != -1 &&
+        //         memcmp(entry0.gid, wr.qp_type.srm.remote_gid.raw,
+        //                 sizeof(wr.qp_type.srm.remote_gid))) {
+        //       continue;
+        //     }
+        //     if (entry0.valid == -1) {
+        //       memcpy(entry0.gid, wr.qp_type.srm.remote_gid.raw,
+        //               sizeof(wr.qp_type.srm.remote_gid));
+        //     }
+            
+        //     hash_ok = 1;
+        //     struct hash_table_entry& entry =
+        //         hash_table[srv_gid][sched_idx]
+        //                   [key*HASH_TABLE_ENTRY_NUM_PER_BUCKET+ hash_table_cur_post[srv_gid][sched_idx][key]];
+        //     entry.idx_table_idx = cur_post;
+
+        //     index_table[srv_gid][sched_idx][cur_post].hash_table_idx =
+        //         key*HASH_TABLE_ENTRY_NUM_PER_BUCKET+ hash_table_cur_post[srv_gid][sched_idx][key];
+
+        //     hash_table_cur_post[srv_gid][sched_idx][key]= (hash_table_cur_post[srv_gid][sched_idx][key]+1)%HASH_TABLE_ENTRY_NUM_PER_BUCKET;
+
+        //     uint32_t one = 1;
+        //     __atomic_store(&index_table[srv_gid][sched_idx][cur_post].valid, &one,
+        //                     __ATOMIC_SEQ_CST);  // 先写idx table标记位，再写哈希表
+        //     __atomic_store(&entry.valid, &one, __ATOMIC_SEQ_CST);
+        //     break;
+        //   }
+        //   if (!hash_ok) {
+        //     printf("出现哈希表满了的情况\n");
+        //   }
+        // }
+
+        // 对4KB以上的等级，采用原先等级表+数量表的方式
+        __atomic_fetch_add(
+            wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
+                srv_gid + sched_idx * tot_qp_nums,
+            1, __ATOMIC_SEQ_CST);  // 使用原子操作存储imm值
+
+        // // 插入释放屏障：确保c的更新先于b的更新被可见
+        // __atomic_thread_fence(__ATOMIC_RELEASE);
+
+        __atomic_fetch_add(&level_table[group_idx + sched_idx * 4], 1,
+                            __ATOMIC_SEQ_CST);
+
+        // ed_lat = rdtsc();
+        // double e_cycles = (double)(ed_lat - st_lat);
+        // double e_t_us = (e_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+        // printf("post send cost %.2f us\n",e_t_us);
+        rt_assert(ret == 0);
+        rolling_iter++;
+
+        
+        // clock_gettime(CLOCK_REALTIME, &lat_end);
+        // double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
+        //                     (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
+        // lats.push_back(lat_sec);
       }
-      qp_cn = group_idx * NUM_SCHED + sched_idx;
 
-      wr.opcode = opcode;
-      wr.num_sge = 1;
-      wr.next = nullptr;
-      wr.sg_list = &sgl;
 
-      wr.send_flags = IBV_SEND_SIGNALED;
 
-      sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[0]);
-      sgl.length = real_sz;
-      sgl.lkey = cb->conn_buf_mr->lkey;
-
-      size_t remote_offset = 0;
-      // size_t remote_offset = rolling_iter;
-      wr.wr.rdma.remote_addr = clt_qp[cn][qp_cn]->buf_addr + remote_offset;
-      // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
-      // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-      wr.wr.rdma.rkey = clt_qp[cn][qp_cn]->rkey;
-      wr.qp_type.srm.remote_srqn = clt_qp[cn][qp_cn]->srqn;
-      wr.qp_type.srm.remote_gid.global.interface_id =
-          clt_qp[cn][qp_cn]->gid.global.interface_id;
-      wr.qp_type.srm.remote_gid.global.subnet_prefix =
-          clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
-
-      uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
-      uint32_t kqp_idx =
-          kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
-      *tmp = (uint16_t)kqp_idx ;
-
-      // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
-      //  printf("interface_id:0x%llx,
-      //  subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
-      nb_tx[qp_cn]++;
-
-      // clock_gettime(CLOCK_REALTIME, &lat_start);
-
-      lat_st = rdtsc();
-
-      // printf("ready to post send, rolling_iter%d\n",rolling_iter);
-
-      // uint64_t st_lat,ed_lat;
-      // st_lat = rdtsc();
-
-      int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
-      if(group_idx == 0){
-        xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-        __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
-        __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
-      }
-      // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
-      //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
-      //    qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
-      //    wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]);
-
-      // if(group_idx == 0){
-
-      //   int& cur_post = idx_table_cur_post[srv_gid][sched_idx];
-      //   for (;; cur_post = (cur_post + 1) % IDX_TABLE_ENTRY_NUM) {
-      //     if (index_table[srv_gid][sched_idx][cur_post].valid == 0) {
-      //       // 填入该位置
-      //       index_table[srv_gid][sched_idx][cur_post]
-      //           .wqe_idx = wr.wr_id;  
-
-      //       break;
-      //     }
-      //   }
-      //   // 索引表和哈希表只用于0~4KB的聚合
-      //   bool hash_ok = false;
-      //   int hash_val = sched_hash_ip((char*)&wr.qp_type.srm.remote_gid.raw[12],
-      //                                 HASH_TABLE_KEY_NUM);
-
-      //   for (int i = 0; i < HASH_TABLE_KEY_NUM; i++) {
-      //     int key = hash_next_key(hash_val, i, HASH_TABLE_KEY_NUM);
-      //     struct hash_table_entry& entry0 =
-      //         hash_table[srv_gid][sched_idx]
-      //                   [key * HASH_TABLE_ENTRY_NUM_PER_BUCKET];
-      //     if (entry0.valid != -1 &&
-      //         memcmp(entry0.gid, wr.qp_type.srm.remote_gid.raw,
-      //                 sizeof(wr.qp_type.srm.remote_gid))) {
-      //       continue;
-      //     }
-      //     if (entry0.valid == -1) {
-      //       memcpy(entry0.gid, wr.qp_type.srm.remote_gid.raw,
-      //               sizeof(wr.qp_type.srm.remote_gid));
-      //     }
-          
-      //     hash_ok = 1;
-      //     struct hash_table_entry& entry =
-      //         hash_table[srv_gid][sched_idx]
-      //                   [key*HASH_TABLE_ENTRY_NUM_PER_BUCKET+ hash_table_cur_post[srv_gid][sched_idx][key]];
-      //     entry.idx_table_idx = cur_post;
-
-      //     index_table[srv_gid][sched_idx][cur_post].hash_table_idx =
-      //         key*HASH_TABLE_ENTRY_NUM_PER_BUCKET+ hash_table_cur_post[srv_gid][sched_idx][key];
-
-      //     hash_table_cur_post[srv_gid][sched_idx][key]= (hash_table_cur_post[srv_gid][sched_idx][key]+1)%HASH_TABLE_ENTRY_NUM_PER_BUCKET;
-
-      //     uint32_t one = 1;
-      //     __atomic_store(&index_table[srv_gid][sched_idx][cur_post].valid, &one,
-      //                     __ATOMIC_SEQ_CST);  // 先写idx table标记位，再写哈希表
-      //     __atomic_store(&entry.valid, &one, __ATOMIC_SEQ_CST);
-      //     break;
-      //   }
-      //   if (!hash_ok) {
-      //     printf("出现哈希表满了的情况\n");
-      //   }
-      // }
-
-      // 对4KB以上的等级，采用原先等级表+数量表的方式
-      __atomic_fetch_add(
-          wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-              srv_gid + sched_idx * tot_qp_nums,
-          1, __ATOMIC_SEQ_CST);  // 使用原子操作存储imm值
-
-      // // 插入释放屏障：确保c的更新先于b的更新被可见
-      // __atomic_thread_fence(__ATOMIC_RELEASE);
-
-      __atomic_fetch_add(&level_table[group_idx + sched_idx * 4], 1,
-                          __ATOMIC_SEQ_CST);
-
-      // ed_lat = rdtsc();
-      // double e_cycles = (double)(ed_lat - st_lat);
-      // double e_t_us = (e_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
-      // printf("post send cost %.2f us\n",e_t_us);
-      rt_assert(ret == 0);
-      rolling_iter++;
-
-      ret = hrd_poll_cq_ret(cb->conn_cq[0], 1, wc);
+      
+      int ret = hrd_poll_cq_ret(cb->conn_cq[0],kAppLatBatch,wc);
       if (ret == -1) {
+        printf("lat thread poll cq error\n");
         hrd_ctrl_blk_destroy_srm(cb);
         return;
       }
-      
-      //uint64_t lat_mid = __atomic_load_n(wr.cycles,__ATOMIC_SEQ_CST);
-      lat_ed = rdtsc();
-      if (sgl.length <= KB(10)) {
-        elapsed_cycles = (double)(lat_ed - lat_st);
-        elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
-        lats.push_back(elapsed_time_us);
 
-        // double el_cyc_0 = (double)(lat_ed - lat_mid),el_cyc_1 = (double)(lat_mid - lat_st);
-        // double el_time_0 = (el_cyc_0 / CPU_FREQUENCY_HZ) * 1000000.0,el_time_1 = (el_cyc_1 / CPU_FREQUENCY_HZ) * 1000000.0;
-        // fprintf(log_file,"level:%d, 调度器idx:%d, xrc qp idx:%d, 总延时: %.2f us, doorbell后到完成延时: %.2f us, 发送前到doorbell后延时: %.2f us, size:%d bytes\n",
-        //         group_idx, sched_idx, kqp_idx, elapsed_time_us,el_time_0,el_time_1,sgl.length);
-        // fflush(log_file);
+
+      
+      lat_ed = rdtsc();
+      elapsed_cycles = (double)(lat_ed - lat_st);
+      elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
+      double avg_time_us = elapsed_time_us / kAppLatBatch;
+      for(int i = 0;i<kAppLatBatch;i++){
+        lats.push_back(avg_time_us);
       }
-      // clock_gettime(CLOCK_REALTIME, &lat_end);
-      // double lat_sec = (lat_end.tv_sec - lat_start.tv_sec)*1e6 +
-      //                     (lat_end.tv_nsec - lat_start.tv_nsec) / 1e3;
-      // lats.push_back(lat_sec);
+      
+      // if(ret>0)
+      //   printf("poll completions:%d\n",ret);
+      
     }
   }
 }
