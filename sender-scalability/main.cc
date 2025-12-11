@@ -1087,6 +1087,7 @@ void run_server_srm(thread_params_t* params) {
           lat_st = rdtsc();
 
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+        //printf("lat thread post send ret:%d\n",ret);
         if(group_idx == 0){
           xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
           __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
