@@ -41,7 +41,7 @@ static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1024;//qp的总size需要是batch的两倍，原因是聚合。
-static constexpr size_t kAppLatBatch = 4;
+static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -98,6 +98,7 @@ int barrier_count = 0;               // 到达线程墙的线程计数
 struct xrc_table_entry {
   uint64_t ctrl;
   uint64_t tot_bytes;
+  uint64_t tot_recv_cqes;
 } __cacheline_aligned;  // 对齐到多少字节？
 
 
@@ -130,7 +131,7 @@ struct user_table_info {
 #define KQP_NUM_PER_THREAD (KERNEL_QP_NUM / kAppNumServers)
 
 
-#define XRC_TABLE_SIZE ((kAppNumServers + FLAGS_test_lat_thread)*NUM_SCHED \
+#define XRC_TABLE_SIZE ((kAppNumServers + FLAGS_test_lat_thread)*(4*NUM_SCHED) \
         *KQP_NUM_PER_THREAD *sizeof(struct xrc_table_entry))
 
 // FNV-1a算法的初始偏移量和质数（针对32位哈希）
@@ -145,7 +146,7 @@ const static int golden_step =
 
 uint32_t *wqe_table, *level_table;
 
-struct xrc_table_entry (*xrc_table)[NUM_SCHED][KQP_NUM_PER_THREAD];
+struct xrc_table_entry (*xrc_table)[4*NUM_SCHED][KQP_NUM_PER_THREAD];
 uint64_t xrc_tot_bytes[kAppNumServers + 1][NUM_SCHED][KQP_NUM_PER_THREAD];
 
 int kqp_idx_arr[kAppNumServers + 1][KQP_NUM_PER_THREAD];
@@ -765,6 +766,7 @@ void run_server_srm(thread_params_t* params) {
             rt_assert(false);
           }
         }
+        __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,ret,__ATOMIC_SEQ_CST);
         // if(ret>0)
         //   printf("poll completions:%d\n",ret);
         nxt_post_wqe_nums += ret;
@@ -843,11 +845,11 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        // real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
         // if(real_sz < KB(4)){
         //   real_sz =KB(4);
         // }
-        real_sz = KB(4);
+        // real_sz = KB(4);
 
 
         tot_sz += real_sz;
@@ -905,8 +907,8 @@ void run_server_srm(thread_params_t* params) {
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
         if(group_idx == 0){
           xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
-          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+          __atomic_store_n(&xrc_table[srv_gid][4*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
+          __atomic_store_n(&xrc_table[srv_gid][4*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
         }
         
 
@@ -1090,8 +1092,8 @@ void run_server_srm(thread_params_t* params) {
         //printf("lat thread post send ret:%d\n",ret);
         if(group_idx == 0){
           xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
-          __atomic_store_n(&xrc_table[srv_gid][sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+          __atomic_store_n(&xrc_table[srv_gid][4*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
+          __atomic_store_n(&xrc_table[srv_gid][4*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
         }
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
         //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
@@ -1188,6 +1190,7 @@ void run_server_srm(thread_params_t* params) {
         return;
       }
 
+      __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,kAppLatBatch,__ATOMIC_SEQ_CST);
 
       
       lat_ed = rdtsc();
@@ -1587,10 +1590,10 @@ int main(int argc, char* argv[]) {
       level_table[i] = 0;
     }
 
-    xrc_table = (xrc_table_entry (*)[NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
+    xrc_table = (xrc_table_entry (*)[4*NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
 
     for(int i= 0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
-      for(int j=0;j<NUM_SCHED;j++){
+      for(int j=0;j<4*NUM_SCHED;j++){
         for(int k=0;k<KQP_NUM_PER_THREAD;k++){
           xrc_table[i][j][k].ctrl = 0;
           xrc_table[i][j][k].tot_bytes = 0;
