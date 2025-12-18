@@ -511,7 +511,7 @@ void run_server_srm(thread_params_t* params) {
 
   while (1) {
     if(srv_gid != kAppNumServers){
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= KB(256)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds = (msr_end.tv_sec - msr_start.tv_sec) +
                             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
@@ -640,7 +640,7 @@ void run_server_srm(thread_params_t* params) {
       }
       else{
         //test lat thread
-        if(rolling_iter>=KB(256)){
+        if(rolling_iter>=KB(32)){
           double avg = std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
           sort(lats.begin(), lats.end());
           printf("Latency(us): min = %.2f, max = %.2f, avg = %.2f, median = %.2f, 99th = %.2f\n",
@@ -666,7 +666,7 @@ void run_server_srm(thread_params_t* params) {
 
 
         sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * 1024]);
-        sgl.length = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        sgl.length = KB(1);
         sgl.lkey = cb->conn_buf_mr->lkey;
 
         size_t remote_offset = 0;
@@ -1011,7 +1011,7 @@ int main(int argc, char* argv[]) {
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
     //初始化wqe表
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
     int val;
     while(infile>>val){
       traffic_size.push_back(val);

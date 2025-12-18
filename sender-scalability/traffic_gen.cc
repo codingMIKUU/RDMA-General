@@ -63,13 +63,13 @@ std::vector<std::pair<double, double>> read_cdf_file(const std::string& filename
 }
 
 int main() {
-    std::string filename = "Twitter-cluster12.txt";
+    std::string filename = "AliStorage2019.txt";
     auto cdf = read_cdf_file(filename);
 
     CustomRandCdf crand;
     crand.setCdf(cdf);
     auto samples = crand.sample(100000);//samples里存放100000个符合cdf分布的流量值，在rdma-general里，可以直接让不同qp的wqe size的值为sample[i]
-
+ 
 
 
     
@@ -98,7 +98,7 @@ int main() {
 
 
 
-    std::ofstream outfile("Twitter-cluster12_traffic_size.txt");
+    std::ofstream outfile("AliStorage2019_traffic_size.txt");
     for(auto v : samples){
         outfile << v<<" ";
     }
