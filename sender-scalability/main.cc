@@ -40,7 +40,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 512;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -102,6 +102,7 @@ struct xrc_table_entry {
 } __cacheline_aligned;  // 对齐到多少字节？
 
 
+
 struct user_table_info {
   void* table_addr;
   void* level_table_addr;
@@ -114,7 +115,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM  16
+#define KERNEL_QP_NUM  1024
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -151,6 +152,11 @@ struct xrc_table_entry (*xrc_table)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD];
 uint64_t xrc_tot_bytes[kAppNumServers + 1][NUM_SCHED][KQP_NUM_PER_THREAD];
 
 int kqp_idx_arr[kAppNumServers + 1][KQP_NUM_PER_THREAD];
+
+#define KQP_WQE_LIMIT 512 //记得要和驱动同步
+int kqp_cnt[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL][KQP_NUM_PER_THREAD]; 
+int free_kqp_cnt[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL];
+int free_kqp_idx[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL][KQP_NUM_PER_THREAD];
 static inline uint64_t rdtsc() {
   unsigned int lo, hi;
   __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
@@ -329,7 +335,7 @@ void run_server(thread_params_t* params) {
   thread_barrier();
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(512)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -414,7 +420,8 @@ void run_server(thread_params_t* params) {
       }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = 512;
       tot_sz += real_sz;
 
       sgl.addr =
@@ -449,7 +456,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(256)) {
+      if (rolling_iter >= KB(32)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -485,7 +492,7 @@ void run_server(thread_params_t* params) {
       wr.send_flags = IBV_SEND_SIGNALED;
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = 1;
 
       sgl.addr =
           reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
@@ -525,6 +532,31 @@ void run_server(thread_params_t* params) {
 }
 int hash_next_key(int hash_val, int i, int sz) {
   return (hash_val + i * golden_step) & (sz - 1);
+}
+
+static inline int get_free_qp_idx(int srv_gid, int srm_idx, uint64_t* seed){
+  if(free_kqp_cnt[srv_gid][srm_idx] == 0){
+    printf("Error: no free kqp idx!\n");
+    return -1;
+  }
+  int pos_idx = hrd_fastrand(seed) % free_kqp_cnt[srv_gid][srm_idx];
+  int kqp_idx = free_kqp_idx[srv_gid][srm_idx][pos_idx];
+  kqp_cnt[srv_gid][srm_idx][kqp_idx]++;
+  if(kqp_cnt[srv_gid][srm_idx][kqp_idx] == KQP_WQE_LIMIT){
+    //移除该idx
+    free_kqp_cnt[srv_gid][srm_idx]--;
+    free_kqp_idx[srv_gid][srm_idx][pos_idx] = free_kqp_idx[srv_gid][srm_idx][free_kqp_cnt[srv_gid][srm_idx]];
+    //printf("should not exits\n");
+  }
+  return kqp_idx;
+}
+static inline void put_free_qp_idx(int srv_gid,int srm_idx, int kqp_idx){
+  if(kqp_cnt[srv_gid][srm_idx][kqp_idx] == KQP_WQE_LIMIT){
+    //加入该idx
+    free_kqp_idx[srv_gid][srm_idx][free_kqp_cnt[srv_gid][srm_idx]] = kqp_idx;
+    free_kqp_cnt[srv_gid][srm_idx]++;
+  }
+  kqp_cnt[srv_gid][srm_idx][kqp_idx]--;
 }
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
@@ -695,7 +727,7 @@ void run_server_srm(thread_params_t* params) {
   int lat_st_head = 0,lat_st_tail = 0;
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= MB(1)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -767,6 +799,9 @@ void run_server_srm(thread_params_t* params) {
             rt_assert(false);
           }
         }
+        for(int i = 0;i<ret;i++){
+          put_free_qp_idx(srv_gid,(wc[i].wr_id >> 32LL),wc[i].wr_id & 0xffffffff);
+        }
         __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,ret,__ATOMIC_SEQ_CST);
         // if(ret>0)
         //   printf("poll completions:%d\n",ret);
@@ -775,7 +810,7 @@ void run_server_srm(thread_params_t* params) {
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= KB(512)) {
+        if (rolling_iter >= MB(1)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -846,11 +881,9 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        // if(real_sz < KB(4)){
-        //   real_sz =KB(4);
-        // }
-        // real_sz = KB(4);
+        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+
+        real_sz = 512;
 
 
         tot_sz += real_sz;
@@ -888,8 +921,10 @@ void run_server_srm(thread_params_t* params) {
             clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
         uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
         uint32_t kqp_idx =
-            kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
+            kqp_idx_arr[srv_gid][get_free_qp_idx(srv_gid,NUM_SCHED*group_idx + sched_idx,&ker_qp_seed)];
+            //kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
         *tmp = (uint16_t)kqp_idx ;
+        wr.wr_id = kqp_idx | (((uint64_t)(NUM_SCHED*group_idx + sched_idx))<<32);//低32位为xrc_idx，高32位为srm_idx
 
         // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
         //  printf("interface_id:0x%llx,
@@ -998,7 +1033,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(16)) {
+      if (rolling_iter >= KB(128)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1539,110 +1574,122 @@ int main(int argc, char* argv[]) {
     printf("traffic_size size:%d\n,traffic_size[0]:%d\n", traffic_size.size(),
           traffic_size[0]);
 
-    // mmap表
-    
-    struct user_table_info info;
+    if(FLAGS_use_srm){
+      // mmap表
+      
+      struct user_table_info info;
 
-    // 1. 分配页对齐的用户态内存（表）
-    void* table =
-        mmap(NULL, TABLE_SIZE, PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-            -1, 0);
-    if (table == MAP_FAILED) {
-      perror("wqe table mmap失败");
-      return -1;
+      // 1. 分配页对齐的用户态内存（表）
+      void* table =
+          mmap(NULL, TABLE_SIZE, PROT_READ | PROT_WRITE,
+              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+              -1, 0);
+      if (table == MAP_FAILED) {
+        perror("wqe table mmap失败");
+        return -1;
+      }
+
+      void* l_table =
+          mmap(NULL, LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,
+              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+              -1, 0);
+      if (l_table == MAP_FAILED) {
+        perror("level table mmap失败");
+        munmap(table, TABLE_SIZE);
+        return -1;
+      }
+
+      void * x_table = 
+          mmap(NULL, XRC_TABLE_SIZE, PROT_READ | PROT_WRITE,
+              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
+              -1, 0);
+      if(x_table == MAP_FAILED){
+        perror("xrc table mmap失败");
+        return -1;
+      }
+
+      // 2. 初始化表数据
+      wqe_table = (uint32_t*)table;
+      for (int i = 0; i < TABLE_SIZE / sizeof(uint32_t); i++) {
+        wqe_table[i] = 0;
+      }
+
+      level_table = (uint32_t*)l_table;
+      for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(uint32_t); i++) {
+        level_table[i] = 0;
+      }
+
+      xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
+
+      for(int i= 0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
+        for(int j=0;j<NUM_LEVEL*NUM_SCHED;j++){
+          for(int k=0;k<KQP_NUM_PER_THREAD;k++){
+            xrc_table[i][j][k].ctrl = 0;
+            xrc_table[i][j][k].tot_bytes = 0;
+          }
+        }
+      }
+
+      info.table_addr = table;
+      info.table_size = TABLE_SIZE;
+      info.level_table_addr = l_table;
+      info.level_table_size = LEVEL_TABLE_SIZE;
+
+      info.xrc_table_addr = x_table;
+      info.xrc_table_size = XRC_TABLE_SIZE;
+      info.xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
+
+
+
+
+
+
+
+
+      // 3. 打开内核设备
+      fd = open(DEV_PATH, O_RDWR);
+      if (fd < 0) {
+        perror("打开设备失败");
+        munmap(table, TABLE_SIZE);
+        munmap(l_table, LEVEL_TABLE_SIZE);
+        return -1;
+      }
+
+      // 4. 通过ioctl传递表信息给内核
+      ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
+      if (ret < 0) {
+        perror("ioctl失败");
+        close(fd);
+        munmap(table, TABLE_SIZE);
+        munmap(l_table, LEVEL_TABLE_SIZE);
+        return -1;
+      }
+
+      // 初始化kqp_idx_arr表
+      memset(kqp_idx_arr, -1, sizeof(kqp_idx_arr));
+
+
     }
+    // 初始化随机数种子数组
+    generate_random_seeds(seed_array, kAppNumServers + 1);
 
-    void* l_table =
-        mmap(NULL, LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-            -1, 0);
-    if (l_table == MAP_FAILED) {
-      perror("level table mmap失败");
-      munmap(table, TABLE_SIZE);
-      return -1;
-    }
 
-    void * x_table = 
-        mmap(NULL, XRC_TABLE_SIZE, PROT_READ | PROT_WRITE,
-            MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-            -1, 0);
-    if(x_table == MAP_FAILED){
-      perror("xrc table mmap失败");
-      return -1;
-    }
-
-    // 2. 初始化表数据
-    wqe_table = (uint32_t*)table;
-    for (int i = 0; i < TABLE_SIZE / sizeof(uint32_t); i++) {
-      wqe_table[i] = 0;
-    }
-
-    level_table = (uint32_t*)l_table;
-    for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(uint32_t); i++) {
-      level_table[i] = 0;
-    }
-
-    xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
-
-    for(int i= 0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
-      for(int j=0;j<NUM_LEVEL*NUM_SCHED;j++){
-        for(int k=0;k<KQP_NUM_PER_THREAD;k++){
-          xrc_table[i][j][k].ctrl = 0;
-          xrc_table[i][j][k].tot_bytes = 0;
+    for(int i=0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
+      for(int j =0;j<NUM_LEVEL*NUM_SCHED;j++){
+        free_kqp_cnt[i][j] = KQP_NUM_PER_THREAD;
+        for(int k =0;k<KQP_NUM_PER_THREAD;k++){
+          free_kqp_idx[i][j][k] = k;
         }
       }
     }
-
-    info.table_addr = table;
-    info.table_size = TABLE_SIZE;
-    info.level_table_addr = l_table;
-    info.level_table_size = LEVEL_TABLE_SIZE;
-
-    info.xrc_table_addr = x_table;
-    info.xrc_table_size = XRC_TABLE_SIZE;
-    info.xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
-
-
-
-
-
-
-
-
-    // 3. 打开内核设备
-    fd = open(DEV_PATH, O_RDWR);
-    if (fd < 0) {
-      perror("打开设备失败");
-      munmap(table, TABLE_SIZE);
-      munmap(l_table, LEVEL_TABLE_SIZE);
-      return -1;
-    }
-
-    // 4. 通过ioctl传递表信息给内核
-    ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
-    if (ret < 0) {
-      perror("ioctl失败");
-      close(fd);
-      munmap(table, TABLE_SIZE);
-      munmap(l_table, LEVEL_TABLE_SIZE);
-      return -1;
-    }
-
-    // 初始化kqp_idx_arr表
-    memset(kqp_idx_arr, -1, sizeof(kqp_idx_arr));
-
-    // char filename[64] ;
-    // sprintf(filename, "log_%d.txt",KERNEL_QP_NUM);
-    // log_file = fopen(filename, "w");
-    // if(log_file == NULL){
-    //   perror("fopen失败");
-    //   return -1;
-    // }
-
-    // 初始化随机数种子数组
-    generate_random_seeds(seed_array, kAppNumServers + 1);
   }
+  // char filename[64] ;
+  // sprintf(filename, "log_RC.txt");
+  // log_file = fopen(filename, "w");
+  // if(log_file == NULL){
+  //   perror("fopen失败");
+  //   return -1;
+  // }
 
   size_t num_threads;
   if (FLAGS_is_client == 1) {
@@ -1702,10 +1749,10 @@ int main(int argc, char* argv[]) {
   // }
 
 
-  if(!FLAGS_is_client){
+  if(!FLAGS_is_client && FLAGS_use_srm){
     // 关闭内核设备
     close(fd);
   }
-  // fclose(log_file);
+  fclose(log_file);
   return 0;
 }

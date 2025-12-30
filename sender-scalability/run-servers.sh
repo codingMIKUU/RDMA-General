@@ -11,7 +11,8 @@ sudo pkill memcached
 while pgrep memcached >/dev/null; do
   sleep 0.1
 done
-memcached -u nobody -l 192.168.1.5 1>/dev/null 2>/dev/null &
+# 比如：
+memcached -u nobody -l 192.168.1.5 -m 1024 -c 65535 -t 4 1>/dev/null 2>/dev/null &
 sleep 1
 
 
