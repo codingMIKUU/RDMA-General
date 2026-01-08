@@ -40,7 +40,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 512;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -115,7 +115,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM  1024
+#define KERNEL_QP_NUM  8192
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -228,6 +228,7 @@ void print_qp_info(struct hrd_qp_attr_t* info) {
   printf("addr: %lu\n", info->buf_addr);
 }
 
+std::vector<uint64_t>cpu_cycles;
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -333,9 +334,10 @@ void run_server(thread_params_t* params) {
   uint64_t lat_st, lat_ed;
   double elapsed_cycles, elapsed_time_us;
   thread_barrier();
+
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= KB(128)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -420,8 +422,8 @@ void run_server(thread_params_t* params) {
       }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = 512;
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      //real_sz = 512;
       tot_sz += real_sz;
 
       sgl.addr =
@@ -441,7 +443,20 @@ void run_server(thread_params_t* params) {
       if (FLAGS_test_lat) {
         clock_gettime(CLOCK_REALTIME, &lat_start);
       }
+      // if(srv_gid == 0){
+      //   lat_st = rdtsc();
+      // }
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+      // if(srv_gid == 0){
+      //   lat_ed = rdtsc();
+      //   cpu_cycles.push_back(lat_ed - lat_st);
+      //   if(cpu_cycles.size()>=5000000){
+      //        uint64_t avg_cpu_cycles = std::accumulate(cpu_cycles.begin(),cpu_cycles.end(),0LL)/cpu_cycles.size(); 
+      //        fprintf(log_file,"avg_cpu_cycles %llu\n", avg_cpu_cycles);
+      //        fflush(log_file);
+      //        cpu_cycles.clear();
+      //   }
+      // }
       rt_assert(ret == 0);
       rolling_iter++;
       if (FLAGS_test_lat) {
@@ -456,7 +471,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(32)) {
+      if (rolling_iter >= KB(128)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -492,7 +507,7 @@ void run_server(thread_params_t* params) {
       wr.send_flags = IBV_SEND_SIGNALED;
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = 1;
+      real_sz = KB(1);
 
       sgl.addr =
           reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
@@ -512,6 +527,7 @@ void run_server(thread_params_t* params) {
       lat_st = rdtsc();
 
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+
       rt_assert(ret == 0);
       rolling_iter++;
 
@@ -727,7 +743,7 @@ void run_server_srm(thread_params_t* params) {
   int lat_st_head = 0,lat_st_tail = 0;
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(512)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -799,10 +815,10 @@ void run_server_srm(thread_params_t* params) {
             rt_assert(false);
           }
         }
-        for(int i = 0;i<ret;i++){
-          put_free_qp_idx(srv_gid,(wc[i].wr_id >> 32LL),wc[i].wr_id & 0xffffffff);
-        }
-        __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,ret,__ATOMIC_SEQ_CST);
+        // for(int i = 0;i<ret;i++){
+        //   put_free_qp_idx(srv_gid,(wc[i].wr_id >> 32LL),wc[i].wr_id & 0xffffffff);
+        // }
+        __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,ret,__ATOMIC_RELAXED);
         // if(ret>0)
         //   printf("poll completions:%d\n",ret);
         nxt_post_wqe_nums += ret;
@@ -810,7 +826,7 @@ void run_server_srm(thread_params_t* params) {
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= MB(1)) {
+        if (rolling_iter >= KB(512)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -881,9 +897,9 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
-        real_sz = 512;
+        //real_sz = 512;
 
 
         tot_sz += real_sz;
@@ -921,10 +937,10 @@ void run_server_srm(thread_params_t* params) {
             clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
         uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
         uint32_t kqp_idx =
-            kqp_idx_arr[srv_gid][get_free_qp_idx(srv_gid,NUM_SCHED*group_idx + sched_idx,&ker_qp_seed)];
-            //kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
+            //kqp_idx_arr[srv_gid][get_free_qp_idx(srv_gid,NUM_SCHED*group_idx + sched_idx,&ker_qp_seed)];
+            kqp_idx_arr[srv_gid][hrd_fastrand(&ker_qp_seed) % KQP_NUM_PER_THREAD];
         *tmp = (uint16_t)kqp_idx ;
-        wr.wr_id = kqp_idx | (((uint64_t)(NUM_SCHED*group_idx + sched_idx))<<32);//低32位为xrc_idx，高32位为srm_idx
+        //wr.wr_id = kqp_idx | (((uint64_t)(NUM_SCHED*group_idx + sched_idx))<<32);//低32位为xrc_idx，高32位为srm_idx
 
         // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
         //  printf("interface_id:0x%llx,
@@ -936,11 +952,17 @@ void run_server_srm(thread_params_t* params) {
 
         // printf("ready to post send, rolling_iter%d\n",rolling_iter);
 
+        // if(srv_gid == 0)
+        //   lat_st = rdtsc();
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+
+
+
+
         if(group_idx == 0){
           xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_RELEASE) ;
+          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_RELEASE);
         }
         
 
@@ -1010,15 +1032,26 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-            wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-                srv_gid + sched_idx * tot_qp_nums,
-            1, __ATOMIC_SEQ_CST);  // 使用原子操作存储imm值
+          wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
+            srv_gid + sched_idx * tot_qp_nums,
+          1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
         // __atomic_thread_fence(_file);
 
         __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL], 1,
-                            __ATOMIC_SEQ_CST);
+                __ATOMIC_RELEASE);
+
+        // if(srv_gid == 0){
+        //   lat_ed = rdtsc();
+        //   cpu_cycles.push_back(lat_ed - lat_st);
+        //   if(cpu_cycles.size()>=5000000){
+        //       uint64_t avg_cpu_cycles = std::accumulate(cpu_cycles.begin(),cpu_cycles.end(),0LL)/cpu_cycles.size(); 
+        //       fprintf(log_file,"avg_cpu_cycles %llu\n", avg_cpu_cycles);
+        //       fflush(log_file);
+        //       cpu_cycles.clear();
+        //   }
+        // }
         
         // fprintf(log_file,"当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
         //   qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
@@ -1033,7 +1066,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(128)) {
+      if (rolling_iter >= KB(64)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1120,8 +1153,8 @@ void run_server_srm(thread_params_t* params) {
         //printf("lat thread post send ret:%d\n",ret);
         if(group_idx == 0){
           xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_SEQ_CST) ;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_SEQ_CST);
+          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_RELEASE) ;
+          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_RELEASE);
         }
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
         //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
@@ -1184,15 +1217,15 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-            wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-                srv_gid + sched_idx * tot_qp_nums,
-            1, __ATOMIC_SEQ_CST);  // 使用原子操作存储imm值
+          wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
+            srv_gid + sched_idx * tot_qp_nums,
+          1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
         // __atomic_thread_fence(__ATOMIC_RELEASE);
 
         __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL], 1,
-                            __ATOMIC_SEQ_CST);
+                __ATOMIC_RELEASE);
 
         // ed_lat = rdtsc();
         // double e_cycles = (double)(ed_lat - st_lat);
@@ -1218,7 +1251,7 @@ void run_server_srm(thread_params_t* params) {
         return;
       }
 
-      __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,kAppLatBatch,__ATOMIC_SEQ_CST);
+      __atomic_fetch_add(&xrc_table[srv_gid][0][0].tot_recv_cqes,kAppLatBatch,__ATOMIC_RELAXED);
 
       
       lat_ed = rdtsc();
@@ -1684,7 +1717,7 @@ int main(int argc, char* argv[]) {
     }
   }
   // char filename[64] ;
-  // sprintf(filename, "log_RC.txt");
+  // sprintf(filename, "log_FCScale_ps.txt");
   // log_file = fopen(filename, "w");
   // if(log_file == NULL){
   //   perror("fopen失败");
@@ -1753,6 +1786,6 @@ int main(int argc, char* argv[]) {
     // 关闭内核设备
     close(fd);
   }
-  fclose(log_file);
+  //fclose(log_file);
   return 0;
 }

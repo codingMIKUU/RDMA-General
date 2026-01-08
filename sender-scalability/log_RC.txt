@@ -1,0 +1,13 @@
+avg_cpu_cycles 408
+avg_cpu_cycles 397
+avg_cpu_cycles 396
+avg_cpu_cycles 397
+avg_cpu_cycles 397
+avg_cpu_cycles 396
+avg_cpu_cycles 397
+avg_cpu_cycles 397
+avg_cpu_cycles 397
+avg_cpu_cycles 399
+avg_cpu_cycles 398
+avg_cpu_cycles 397
+avg_cpu_cycles 397
