@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include "smart.h"
 
 
 #include "libhrd_cpp/hrd.h"
@@ -38,9 +39,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 1024;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 512;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -68,6 +69,7 @@ DEFINE_uint64(use_xrc, 0, "Use XRC");
 DEFINE_uint64(test_lat, 0, "Test latency");
 DEFINE_uint64(use_srm, 0, "Test SRM QPs");
 DEFINE_uint64(test_lat_thread, 0, "Test latency thread");
+DEFINE_uint64(use_smart_rc, 0, "use Smart in RC");
 
 std::vector<size_t> traffic_size;
 
@@ -282,8 +284,8 @@ void run_server(thread_params_t* params) {
       if (clt_qp[0] == nullptr) usleep(20000);
     }
 
-    printf("main: Server %zu found client %zu! Connecting..\n", srv_gid,
-           kAppNumClients);
+    // printf("main: Server %zu found client %zu! Connecting..\n", srv_gid,
+    //        kAppNumClients);
     hrd_connect_qp(cb, 0, clt_qp[0]);
     hrd_wait_till_ready(clt_qp_name);
 
@@ -309,6 +311,13 @@ void run_server(thread_params_t* params) {
   }
 
   printf("main: Server %zu ready\n", srv_gid);
+
+// 注册本线程所有要轮询的CQ，供SMART在积分不足时轮询多个CQ
+  if (!FLAGS_use_srm && FLAGS_use_smart_rc) {
+    for (size_t i = 0; i < cb->conn_config.num_qps; ++i) {
+      smartshim::register_cq(cb->conn_cq[i]);
+    }
+  }
 
   struct ibv_send_wr wr, *bad_send_wr;
   struct ibv_sge sgl;
@@ -376,7 +385,6 @@ void run_server(thread_params_t* params) {
         rolling_iter = 0;
         tot_sz = 0;
         clock_gettime(CLOCK_REALTIME, &msr_start);
-
         if (FLAGS_test_lat) {
           double avg =
               std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
@@ -413,14 +421,28 @@ void run_server(thread_params_t* params) {
           nb_tx[qp_cn] % kAppUnsigBatch == 0 ? IBV_SEND_SIGNALED : 0;
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&
           !FLAGS_test_lat) {
-        // This can happen if a client dies before the server
-        int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+        int ret=0;
+        if (!FLAGS_use_srm && FLAGS_use_smart_rc) {
+          // 若刚在 before_post_send 中从该CQ拿过CQE，则跳过busy-wait并复位标志
+          if (!smartshim::likely_cq_has_cqe(cb->conn_cq[qp_cn])) {
+            smartshim::clear_cq_flag(cb->conn_cq[qp_cn]);
+            ret = 0;
+          } else {
+            // printf("before hrd_poll_cq_ret1 \n");
+            ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+            // printf("hrd_poll_cq_ret return %d\n", ret);
+            smartshim::clear_cq_flag(cb->conn_cq[qp_cn]);
+            if (ret > 0) smartshim::on_cq_completions(ret*kAppUnsigBatch);
+          }
+        } else {
+          // This can happen if a client dies before the server
+          ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
+        }
         if (ret == -1) {
           hrd_ctrl_blk_destroy(cb);
           return;
         }
       }
-
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
       //real_sz = 512;
@@ -446,6 +468,11 @@ void run_server(thread_params_t* params) {
       // if(srv_gid == 0){
       //   lat_st = rdtsc();
       // }
+      if(!FLAGS_use_srm && FLAGS_use_smart_rc){
+        int ret_smart = smartshim::before_post_send(1, cb->conn_cq[qp_cn], &wc, kAppUnsigBatch);
+      }
+      
+
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
       // if(srv_gid == 0){
       //   lat_ed = rdtsc();
@@ -530,7 +557,6 @@ void run_server(thread_params_t* params) {
 
       rt_assert(ret == 0);
       rolling_iter++;
-
       ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, &wc);
       if (ret == -1) {
         hrd_ctrl_blk_destroy(cb);
@@ -1595,11 +1621,17 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
   rt_assert(kAppNumClients % kAppNumClientMachines == 0,
             "NumClients must can be div by NumMachines");
-
+  if(!FLAGS_use_srm && FLAGS_use_smart_rc){    
+    smartshim::Config cfg;
+    smartshim::init(cfg);//参数来源于smart.h
+    smartshim::start_tuner();
+  
+  }
   int fd, ret;
   if(!FLAGS_is_client){
     // 初始化wqe表
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    // std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);
@@ -1780,7 +1812,10 @@ int main(int argc, char* argv[]) {
   //   ibv_dealloc_pd(srm_pd);
   //   ibv_close_device(srm_cb->resolve.ib_ctx);
   // }
-
+  if(!FLAGS_use_srm && FLAGS_use_smart_rc){
+    smartshim::stop_tuner();
+  }
+  
 
   if(!FLAGS_is_client && FLAGS_use_srm){
     // 关闭内核设备

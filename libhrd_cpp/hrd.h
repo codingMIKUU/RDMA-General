@@ -23,7 +23,7 @@
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
 static constexpr size_t kHrdMaxInline = 128;
-static constexpr size_t kHrdSQDepth = 4096;   ///< Depth of all SEND queues,512
+static constexpr size_t kHrdSQDepth = 512;   ///< Depth of all SEND queues,512
 static constexpr size_t kHrdRQDepth = 128;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
@@ -235,8 +235,7 @@ static inline void hrd_poll_cq(struct ibv_cq* cq, int num_comps,
 // Fill @wc with @num_comps comps from this @cq. Return -1 on error, else 0.
 static inline int hrd_poll_cq_ret(struct ibv_cq* cq, int num_comps,
                                   struct ibv_wc* wc) {
-  int comps = 0;
-
+  int comps = 0;             
   while (comps < num_comps) {
     int new_comps = ibv_poll_cq(cq, num_comps - comps, &wc[comps]);
     if (new_comps != 0) {
@@ -248,9 +247,8 @@ static inline int hrd_poll_cq_ret(struct ibv_cq* cq, int num_comps,
 
       comps += new_comps;
     }
-  }
-
-  return 0;  // Success
+  }  
+  return comps;  // Success
 }
 
 // Registry functions

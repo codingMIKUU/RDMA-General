@@ -96,3 +96,8 @@ foreach(bench IN LISTS BENCHMARKS)
   add_executable(${bench} ${bench}/main.cc ${HRD_SOURCES})
   target_link_libraries(${bench} ${GTEST_LIBRARIES} ${LIBRARIES})
 endforeach()
+
+target_sources(sender-scalability PRIVATE
+  sender-scalability/smart.cc
+  sender-scalability/smart.h
+)
