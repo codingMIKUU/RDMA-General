@@ -27,14 +27,15 @@ flags="
 	--do_read 0 \
 	--use_xrc 0 \
 	--test_lat 0 \
-	--use_srm 0 \
+	--use_srm  0\
 	--test_lat_thread 1 \
-	--use_smart_rc 1
+	--use_smart_rc 0
 
 "
 
 # Check for non-gdb mode
 if [ "$#" -eq 0 ]; then
+#   sudo -E ../build/sender-scalability $flags
   sudo -E numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
 fi
 

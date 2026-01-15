@@ -7,9 +7,9 @@ namespace smartshim {
 struct Config {
   bool throttler = true;
   bool throttler_auto_tuning = true;
-  int  initial_credit = 4;
-  int  credit_step = 2;
-  int  max_credit = 12;
+  int  initial_credit = 4;//12
+  int  credit_step = 2;//8
+  int  max_credit =12;//48
   int  execution_epochs = 60;
   uint64_t sample_cycles = 19200000;
   double inf_credit_weight = 1.05;
@@ -17,7 +17,6 @@ struct Config {
 
 // Initialize throttler with config. Call once before threads run.
 void init(const Config& cfg);
-
 // Start/stop the background tuner thread (optional if auto_tuning=false)
 void start_tuner();
 void stop_tuner();
@@ -38,8 +37,12 @@ void clear_cq_flag(ibv_cq* cq);
 
 // Call before actually invoking ibv_post_send(). wrs = number of WQEs you are posting now.
 int before_post_send(int wrs, ibv_cq* cq, ibv_wc* wc, size_t kAppUnsigBatch);
+// 向 smartshim 注册当前线程的 next_poll_at 表（长度为该线程 QP 数）
+void register_next_poll_table(size_t* next_poll_at, size_t len);
 
 // Call after polling CQ. n = number of completions you got from this CQ poll.
 void on_cq_completions(int n);
+// 记录热点CQ：该SQ刚post了wqe_count个WQE，后续需要从此CQ收集wqe_count个CQE
+void record_hot_cq(ibv_cq* cq, int wqe_count);
 
 } // namespace smartshim

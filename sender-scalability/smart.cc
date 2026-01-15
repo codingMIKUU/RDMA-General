@@ -31,6 +31,7 @@
 #include <infiniband/verbs.h>
 #include <vector>   // 新增
 #include <unordered_map>
+#include <algorithm>
 
 size_t kAppNumClients=512;
 
@@ -58,7 +59,9 @@ struct ThreadLocal {
     std::vector<uint8_t> cq_flag;  // 0=未获取过CQE，1=刚在before_post_send获取过CQE
     std::unordered_map<ibv_cq*, size_t> cq_index; // CQ到下标映射，避免遍历
     int rr_cursor;              // 轮询起点游标
-    ThreadLocal() : credit(0), ack_req_estimation(0), rr_cursor(0) {}
+    size_t* next_poll_at;
+    size_t  next_poll_len;
+    ThreadLocal() : credit(0), ack_req_estimation(0), rr_cursor(0), next_poll_at(nullptr), next_poll_len(0)  {}
 };
 
 static ThreadLocal g_tls[kMaxThreads];
@@ -87,6 +90,12 @@ void init(const Config& cfg) {
     // fprintf(stderr, "[SMART] init: initial_credit=%d\n", gcfg.initial_credit);
 }
 
+void register_next_poll_table(size_t* next_poll_at, size_t len) {
+  auto& tl = g_tls[thread_id()];
+  tl.next_poll_at = next_poll_at;
+  tl.next_poll_len = len;
+}
+
 bool has_credit(int wrs) {
   if (!gcfg.throttler) return true;
   auto& tl = g_tls[thread_id()];
@@ -97,6 +106,7 @@ int get_credit() {
   auto& tl = g_tls[thread_id()];
   return tl.credit.load(std::memory_order_relaxed);
 }
+
 
 // 新增：注册CQ
 void register_cq(ibv_cq* cq) {
@@ -134,43 +144,86 @@ int before_post_send(int wrs, ibv_cq* cq, ibv_wc* wc, size_t kAppUnsigBatch) {
   int ret=0;
   if (!gcfg.throttler) return 0;
   auto& tl = g_tls[thread_id()];
-//   printf("[SMART] before_post_send(%d), credit=%d\n", wrs, tl.credit.load(std::memory_order_relaxed));
-  while (tl.credit.load(std::memory_order_relaxed) < wrs) {
+  // printf("[SMART] before_post_send(%d), credit=%d\n", wrs, tl.credit.load(std::memory_order_relaxed));
+  // while (tl.credit.load(std::memory_order_relaxed) < wrs) {
+  //   int rc = 0;
+  //   if (!tl.cqs.empty()) {
+  //     int n = static_cast<int>(tl.cqs.size());
+  //     int start = tl.rr_cursor % n;
+  //     bool got = false;
+  //     for (int i = 0; i < n; ++i) {
+  //       int idx = (start + i) % n;
+  //       rc = ibv_poll_cq(tl.cqs[idx], kAppUnsigBatch, wc);
+  //       if (rc > 0) {
+  //         tl.rr_cursor = idx + 1;     // 下次从下一个CQ开始
+  //         if(rc==kAppUnsigBatch) tl.cq_flag[idx] = 1;        // 记录：该CQ刚获取过CQE
+  //         got = true;
+  //         // printf("有积分\n");
+  //         break;
+  //       }
+  //     }
+  //     if (!got) {
+  //       std::this_thread::yield();
+  //       // printf("没积分\n");
+  //       continue;
+  //     }
+  //   } else {
+  //     // 未注册列表时，仅轮询传入的CQ
+  //     rc = ibv_poll_cq(cq, 1, wc);
+  //     if (rc <= 0) {
+  //       std::this_thread::yield();
+  //       continue;
+  //     }
+  //   }
+
+  //   // 回收积分
+  //   tl.credit.fetch_add(rc, std::memory_order_relaxed);
+  //   tl.ack_req_estimation.fetch_add(rc, std::memory_order_relaxed);
+  //   ret = 2;
+  //   if (wc->wr_id == kAppNumClients - 1) ret = 1;
+  // }
+  // printf("[SMART] before_post_send(%d), credit=%d\n", wrs, tl.credit.load(std::memory_order_relaxed));
+    while (tl.credit.load(std::memory_order_relaxed) < wrs) {
     int rc = 0;
+    int polled_idx = -1;
+
     if (!tl.cqs.empty()) {
-      int n = static_cast<int>(tl.cqs.size());
+      int n = (int)tl.cqs.size();
       int start = tl.rr_cursor % n;
       bool got = false;
       for (int i = 0; i < n; ++i) {
         int idx = (start + i) % n;
-        rc = ibv_poll_cq(tl.cqs[idx], 1, wc);
+        rc = ibv_poll_cq(tl.cqs[idx], (int)kAppUnsigBatch, wc);
         if (rc > 0) {
-          tl.rr_cursor = idx + 1;     // 下次从下一个CQ开始
-          tl.cq_flag[idx] = 1;        // 记录：该CQ刚获取过CQE
+          tl.rr_cursor = idx + 1;
+          if (rc == (int)kAppUnsigBatch) tl.cq_flag[idx] = 1;
+          polled_idx = idx;  // 记录本次被轮询到的 CQ 的索引
           got = true;
           break;
         }
       }
-      if (!got) {
-        std::this_thread::yield();
-        continue;
-      }
+      if (!got) { std::this_thread::yield(); continue; }
     } else {
-      // 未注册列表时，仅轮询传入的CQ
       rc = ibv_poll_cq(cq, 1, wc);
-      if (rc <= 0) {
-        std::this_thread::yield();
-        continue;
-      }
+      if (rc <= 0) { std::this_thread::yield(); continue; }
+      // 尝试映射传入 cq -> idx（若这个 cq 也在注册表里）
+      auto it = tl.cq_index.find(cq);
+      if (it != tl.cq_index.end()) polled_idx = (int)it->second;
     }
 
     // 回收积分
-    tl.credit.fetch_add(rc*kAppUnsigBatch, std::memory_order_relaxed);
-    tl.ack_req_estimation.fetch_add(rc*kAppUnsigBatch, std::memory_order_relaxed);
+    tl.credit.fetch_add(rc, std::memory_order_relaxed);
+    tl.ack_req_estimation.fetch_add(rc, std::memory_order_relaxed);
+
+    // 动态推进目标 QP 的 next_poll_at
+    if (polled_idx >= 0 && tl.next_poll_at && (size_t)polled_idx < tl.next_poll_len) {
+      tl.next_poll_at[polled_idx] += (size_t)rc;
+    }
+
     ret = 2;
     if (wc->wr_id == kAppNumClients - 1) ret = 1;
   }
-//   printf("[SMART] before_post_send(%d), credit=%d\n", wrs, tl.credit.load(std::memory_order_relaxed));
+  // printf("有积分了 before_post_send(%d), credit=%d\n", wrs, tl.credit.load(std::memory_order_relaxed));
   tl.credit.fetch_sub(wrs, std::memory_order_relaxed);
   return ret;
 }

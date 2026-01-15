@@ -23,7 +23,7 @@
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
 static constexpr size_t kHrdMaxInline = 128;
-static constexpr size_t kHrdSQDepth = 512;   ///< Depth of all SEND queues,512
+static constexpr size_t kHrdSQDepth = 4096;   ///< Depth of all SEND queues,512
 static constexpr size_t kHrdRQDepth = 128;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
@@ -176,7 +176,9 @@ struct hrd_ctrl_blk_t {
 hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
                                   size_t numa_node,
                                   hrd_conn_config_t* conn_config,
-                                  hrd_dgram_config_t* dgram_config);
+                                  hrd_dgram_config_t* dgram_config,
+                                  struct hrd_ctrl_blk_t* srm_cb,
+                                  struct ibv_pd* srm_pd);
 
 //specified for XRC
 hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index,

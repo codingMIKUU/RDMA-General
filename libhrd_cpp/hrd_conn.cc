@@ -12,7 +12,7 @@
 struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
-                                         hrd_dgram_config_t* dgram_config) {
+                                         hrd_dgram_config_t* dgram_config,struct hrd_ctrl_blk_t* srm_cb, struct ibv_pd* srm_pd) {
   if (kHrdMlx5Atomics) {
     rt_assert(!kRoCE, "mlx5 atomics not supported with RoCE");
     hrd_red_printf(
@@ -72,10 +72,19 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
       assert(cb->dgram_buf_shm_key == -1);
     }
   }
-  // Resolve the port into cb->resolve
-  hrd_resolve_port_index(cb, port_index);
+
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
-  cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+  if(!conn_config->is_client){
+    // Resolve the port into cb->resolve
+    hrd_resolve_port_index(cb, port_index);
+    cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+  }
+  else{
+    memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
+    cb->pd = srm_pd;
+  }
+
+  
 
   assert(cb->pd != nullptr);
   printf("thread %d at line 75: ibv_alloc_pd()  OK!\n", local_hid);
