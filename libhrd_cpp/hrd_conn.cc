@@ -789,7 +789,11 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   struct ibv_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
-  conn_attr.path_mtu = IBV_MTU_1024;
+  // Use the active MTU of the port, capped at 1024 to match
+  // original behavior but avoid exceeding the port capability.
+  enum ibv_mtu mtu = cb->resolve.active_mtu;
+  if (mtu > IBV_MTU_1024) mtu = IBV_MTU_1024;
+  conn_attr.path_mtu = mtu;
   conn_attr.dest_qp_num = remote_qp_attr->qpn;
   conn_attr.rq_psn = kHrdDefaultPSN;
 
@@ -804,7 +808,8 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
     grh.dgid.global.interface_id = remote_qp_attr->gid.global.interface_id;
     grh.dgid.global.subnet_prefix = remote_qp_attr->gid.global.subnet_prefix;
 
-    grh.sgid_index = 3;
+    // Use the same GID index we used when resolving the local port.
+    grh.sgid_index = cb->resolve.gid_index;
     grh.hop_limit = 1;
   }
 

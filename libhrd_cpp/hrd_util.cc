@@ -124,10 +124,16 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
         resolve.ib_ctx = ib_ctx;
         resolve.dev_port_id = port_i;
         resolve.port_lid = port_attr.lid;
+        resolve.active_mtu = port_attr.active_mtu;  // Cache active MTU for later use
 
-        // Resolve and cache the ibv_gid struct for RoCE
+        // Resolve and cache the ibv_gid struct for RoCE. Do NOT hardcode GID
+        // index 3; use 0 by default, and remember which index we used so that
+        // hrd_connect_qp can set sgid_index consistently. Some drivers only
+        // expose index 0 and will return EINVAL if we pass an invalid index.
         if (kRoCE) {
-          int ret = ibv_query_gid(ib_ctx, resolve.dev_port_id, 3, &resolve.gid);
+          resolve.gid_index = 0;  // default GID index
+          int ret = ibv_query_gid(ib_ctx, resolve.dev_port_id,
+                                  resolve.gid_index, &resolve.gid);
           rt_assert(ret == 0, "Failed to query GID");
         }
 

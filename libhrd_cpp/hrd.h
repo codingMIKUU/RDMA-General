@@ -144,6 +144,10 @@ struct hrd_ctrl_blk_t {
     uint8_t dev_port_id;         // 1-based port ID in device. 0 is invalid.
     uint16_t port_lid;           // LID of phy_port. 0 is invalid.
 
+    enum ibv_mtu active_mtu;     // Active MTU of this port
+
+    uint8_t gid_index;           // GID table index used for RoCE
+
     union ibv_gid gid;  // GID, used only for RoCE
   } resolve;
 

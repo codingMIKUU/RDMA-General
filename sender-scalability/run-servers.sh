@@ -5,6 +5,15 @@ export HRD_REGISTRY_IP="192.168.1.5"
 export MLX5_SINGLE_THREADED=0
 drop_shm
 
+# 看 root 里还有没有 LD_LIBRARY_PATH
+sudo -E bash -c 'echo "root LD_LIBRARY_PATH=$LD_LIBRARY_PATH"'
+
+# 看 root 视角下 ldd 的解析结果
+sudo -E bash -c 'ldd /root/zxm/RDMA-General/build/sender-scalability'
+
+
+
+
 blue "Reset server QP registry"
 sudo pkill memcached
 
@@ -36,6 +45,7 @@ flags="
 # Check for non-gdb mode
 if [ "$#" -eq 0 ]; then
 #   sudo -E ../build/sender-scalability $flags
+  #sudo -E LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
   sudo -E numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
 fi
 
