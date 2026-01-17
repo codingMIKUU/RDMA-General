@@ -45,8 +45,8 @@ flags="
 # Check for non-gdb mode
 if [ "$#" -eq 0 ]; then
 #   sudo -E ../build/sender-scalability $flags
-  #sudo -E LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
-  sudo -E numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
+  sudo -E LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
+  #sudo -E numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
 fi
 
 # Check for gdb mode

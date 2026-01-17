@@ -39,8 +39,8 @@ flags="\
 
 # Check for non-gdb mode
 if [ "$#" -eq 1 ]; then
-  #sudo -E LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH numactl --cpunodebind=0 --membind=0 $executable $flags
-  sudo -E numactl --cpunodebind=0 --membind=0 $executable $flags
+  sudo -E LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH numactl --cpunodebind=0 --membind=0 $executable $flags
+  #sudo -E numactl --cpunodebind=0 --membind=0 $executable $flags
 fi
 
 # Check for gdb mode
