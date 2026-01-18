@@ -124,7 +124,7 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
         resolve.ib_ctx = ib_ctx;
         resolve.dev_port_id = port_i;
         resolve.port_lid = port_attr.lid;
-        resolve.active_mtu = port_attr.active_mtu;  // Cache active MTU for later use
+        resolve.active_mtu = IBV_MTU_1024;  // Cache active MTU for later use
 
         // Resolve and cache the ibv_gid struct for RoCE. Do NOT hardcode GID
         // index 3; use 0 by default, and remember which index we used so that
