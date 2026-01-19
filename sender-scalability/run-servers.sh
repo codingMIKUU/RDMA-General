@@ -37,7 +37,7 @@ flags="
 	--use_xrc 0 \
 	--test_lat 0 \
 	--use_srm  0\
-	--test_lat_thread 1 \
+	--test_lat_thread 0 \
 	--use_smart_rc 0
 
 "

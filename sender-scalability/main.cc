@@ -38,10 +38,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumServers = 1;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 128;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -351,7 +351,7 @@ void run_server(thread_params_t* params) {
 
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= KB(128)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -488,8 +488,9 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = KB(1);
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      // Match ib_write_bw -s 1000000 by using FLAGS_size as the message size
+      //real_sz = 1000000;
       tot_sz += real_sz;
 
       sgl.addr =
@@ -839,7 +840,7 @@ int main(int argc, char* argv[]) {
   int fd, ret;
   if(!FLAGS_is_client){
     // 初始化wqe表
-    std::ifstream infile("AliStorage2019_traffic_size.txt");
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     // std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {

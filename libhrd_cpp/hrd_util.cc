@@ -73,10 +73,21 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
   rt_assert(dev_list != nullptr, "Failed to get InfiniBand device list");
   printf("thread %d at line 74: ibv_get_device_list()  OK!\n",cb -> local_hid);
   fflush(stdout);
+
+  // We prefer to bind all benchmarks to device "mlx5_0" explicitly so that
+  // behavior matches perftest invocations that use "-d mlx5_0".
+  const char* desired_dev_name = "mlx5_0";
+
   // Traverse the device list
   int ports_to_discover = phy_port;
 
   for (int dev_i = 0; dev_i < num_devices; dev_i++) {
+    // Skip devices that are not the desired one
+    printf("dev name :%s\n",dev_list[dev_i]->name);
+    if (strcmp(dev_list[dev_i]->name, desired_dev_name) != 0) {
+      continue;
+    }
+
     struct ibv_context* ib_ctx = ibv_open_device(dev_list[dev_i]);
     rt_assert(ib_ctx != nullptr, "Failed to open dev " + std::to_string(dev_i));
 
@@ -124,17 +135,17 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
         resolve.ib_ctx = ib_ctx;
         resolve.dev_port_id = port_i;
         resolve.port_lid = port_attr.lid;
-        resolve.active_mtu = IBV_MTU_1024;  // Cache active MTU for later use
+        // Cache the port's active MTU; hrd_connect_qp will cap it if needed.
+        resolve.active_mtu = port_attr.active_mtu;
 
-        // Resolve and cache the ibv_gid struct for RoCE. Do NOT hardcode GID
-        // index 3; use 0 by default, and remember which index we used so that
-        // hrd_connect_qp can set sgid_index consistently. Some drivers only
-        // expose index 0 and will return EINVAL if we pass an invalid index.
+        // Resolve and cache the ibv_gid struct for RoCE. Here we explicitly
+        // use GID index 3 on mlx5_0 so that traffic uses the same GID as
+        // perftest runs with "-d mlx5_0 -x 3".
         if (kRoCE) {
-          resolve.gid_index = 0;  // default GID index
+          resolve.gid_index = 3;
           int ret = ibv_query_gid(ib_ctx, resolve.dev_port_id,
                                   resolve.gid_index, &resolve.gid);
-          rt_assert(ret == 0, "Failed to query GID");
+          rt_assert(ret == 0, "Failed to query GID at index 3");
         }
 
         return;
