@@ -583,6 +583,7 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
     create_attr.cap.max_send_sge = 1;
     create_attr.cap.max_recv_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
+    create_attr.qp_context = (void*)cb->conn_config.isSmall;
     //printf("???????\n");
     cb->conn_qp[i] = ibv_create_qp(cb->pd, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
@@ -834,9 +835,9 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
   int rts_flags = IBV_QP_STATE | IBV_QP_SQ_PSN;
 
   if (!cb->conn_config.use_uc) {
-    conn_attr.timeout = 14;
-    conn_attr.retry_cnt = 7;
-    conn_attr.rnr_retry = 7;
+    conn_attr.timeout = 20;
+    conn_attr.retry_cnt = 14;
+    conn_attr.rnr_retry = 14;
     conn_attr.max_rd_atomic = cb->conn_config.max_rd_atomic;
     conn_attr.max_dest_rd_atomic = cb->conn_config.max_rd_atomic;
     rts_flags |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |

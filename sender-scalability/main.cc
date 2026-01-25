@@ -38,10 +38,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 1;
+static constexpr size_t kAppNumServers = 4;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 128;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -88,6 +88,15 @@ std::mutex barrier_mutex;            // 互斥锁保护
 std::condition_variable barrier_cv;  // 条件变量
 int barrier_count = 0;               // 到达线程墙的线程计数
 // 线程墙实现
+
+// QP 创建顺序控制：按线程编号递增，串行创建
+std::mutex server_qp_mutex;
+std::condition_variable server_qp_cv;
+size_t next_server_qp_id = 0;
+
+std::mutex client_qp_mutex;
+std::condition_variable client_qp_cv;
+size_t next_client_qp_id = 0;
 
 // 与内核模块一致的定义
 #define BRIDGE_IOCTL_MAGIC 'B'
@@ -254,15 +263,26 @@ void run_server(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
+  conn_config.isSmall = srv_gid == kAppNumServers?1:0;
   // if(FLAGS_use_xrc)
   //   conn_config.sq_depth = kHrdSQDepth*10;
 
   hrd_ctrl_blk_t* cb;
-  if (conn_config.use_xrc == 0)
-    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,NULL,NULL);
-  else
-    cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 0, &conn_config, nullptr,
-                               0);
+  // 串行化 QP 创建：按 srv_gid 递增顺序依次创建
+  {
+    std::unique_lock<std::mutex> lock(server_qp_mutex);
+    server_qp_cv.wait(lock, [&]() { return srv_gid == next_server_qp_id; });
+
+    if (conn_config.use_xrc == 0)
+      cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+                             NULL, NULL);
+    else
+      cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 0, &conn_config,
+                                 nullptr, 0);
+
+    next_server_qp_id++;
+    server_qp_cv.notify_all();
+  }
   // Set the buffer to 0 so that we can detect READ completion by polling.
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
@@ -351,7 +371,7 @@ void run_server(thread_params_t* params) {
 
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(128)) {
+      if (rolling_iter >= KB(512)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -488,9 +508,9 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
       // Match ib_write_bw -s 1000000 by using FLAGS_size as the message size
-      //real_sz = 1000000;
+      real_sz = KB(10);
       tot_sz += real_sz;
 
       sgl.addr =
@@ -665,12 +685,8 @@ void run_client(thread_params_t* params) {
   int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
 
   hrd_conn_config_t conn_config;
-  {
-    // 等待逻辑：确保按 clt_gid 顺序启动客户端线程
-    std::unique_lock<std::mutex> lock(barrier_mutex);
-    // 等待条件满足（等待时会释放锁，被唤醒后重新获取锁）
-    barrier_cv.wait(lock, [&]() { return barrier_count == clt_gid; });
-  }
+  // 本机内的线程编号（从 0 开始），用于本进程内的串行化控制
+  size_t local_tid = clt_gid % num_threads;
 
   // xrcd fd
   conn_config.xrcd_fd =
@@ -692,18 +708,29 @@ void run_client(thread_params_t* params) {
 
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
- 
-  if (clt_gid == 0) {
-    srm_cb = new hrd_ctrl_blk_t();
-    memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb, 0);
-    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+  // 串行化 client 端 QP 创建：按 local_tid 递增顺序依次创建
+  {
+    std::unique_lock<std::mutex> lock(client_qp_mutex);
+    client_qp_cv.wait(lock,
+                      [&]() { return local_tid == next_client_qp_id; });
+
+    if (clt_gid == 0) {
+      srm_cb = new hrd_ctrl_blk_t();
+      memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+      hrd_resolve_port_index(srm_cb, 0);
+      srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+    }
+
+    if (conn_config.use_xrc)
+      cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config,
+                                 nullptr, fst_client_t);
+    else
+      cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,
+                             srm_cb, srm_pd);
+
+    next_client_qp_id++;
+    client_qp_cv.notify_all();
   }
-  if (conn_config.use_xrc)
-    cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,
-                               fst_client_t);
-  else
-    cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,srm_cb,srm_pd);
   // Set to some non-zero value so the server can detect READ completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
