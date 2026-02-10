@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 #include <cmath>
+#include <immintrin.h>
 #include "smart.h"
 
 
@@ -39,9 +40,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 32;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -56,6 +57,7 @@ struct thread_params_t {
   size_t id;
   double* tput;
   double* tput_Gbps;
+  double* soft_peak_gbps;
 };
 
 DEFINE_uint64(machine_id, std::numeric_limits<size_t>::max(), "Machine ID");
@@ -70,6 +72,58 @@ DEFINE_uint64(test_lat, 0, "Test latency");
 DEFINE_uint64(use_srm, 0, "Test SRM QPs");
 DEFINE_uint64(test_lat_thread, 0, "Test latency thread");
 DEFINE_uint64(use_smart_rc, 0, "use Smart in RC");
+DEFINE_double(peak_bw_gbps, 0, "Peak software send bandwidth (Gbps), 0 = unlimited");
+DEFINE_uint64(measure_soft_bw, 0, "Measure per-thread software peak bandwidth");
+
+//peak_bw_gbps代表峰值带宽，单位是Gbps。这个参数用于限制软件发送数据的速率，
+static double measure_cycles_per_second() {
+  static double cached = 0.0;
+  if (cached > 0.0) return cached;
+
+  constexpr double kCalibDurationSec = 0.01;  // 10 ms for stable reading
+  struct timespec start_ts, now_ts;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &start_ts);
+  uint64_t start_cycles = hrd_get_cycles();
+
+  while (true) {
+    clock_gettime(CLOCK_MONOTONIC_RAW, &now_ts);
+    double elapsed =
+        (now_ts.tv_sec - start_ts.tv_sec) +
+        (now_ts.tv_nsec - start_ts.tv_nsec) / 1e9;
+    if (elapsed >= kCalibDurationSec) {
+      uint64_t end_cycles = hrd_get_cycles();
+      cached = static_cast<double>(end_cycles - start_cycles) / elapsed;
+      break;
+    }
+  }
+
+  if (cached <= 0.0) cached = CPU_FREQUENCY_HZ;
+  return cached;
+}
+
+struct BwLimiter {
+  double cycles_per_sec;
+  double bytes_per_sec;
+  size_t next_tsc;
+  BwLimiter()
+      : cycles_per_sec(measure_cycles_per_second()),
+        bytes_per_sec(FLAGS_peak_bw_gbps > 0
+                          ? (FLAGS_peak_bw_gbps * 1e9 / 8.0) /
+                                static_cast<double>(kAppNumServers)
+                          : 0.0),
+        next_tsc(0) {}
+  void wait(size_t bytes) {
+    if (bytes_per_sec <= 0.0) return;
+    size_t now = hrd_get_cycles();
+    if (next_tsc < now) next_tsc = now;
+    double need = (bytes / bytes_per_sec) * cycles_per_sec;
+    size_t target = next_tsc + static_cast<size_t>(need);
+    while (hrd_get_cycles() < target) {
+      _mm_pause();
+    }
+    next_tsc = target;
+  }
+};
 
 std::vector<size_t> traffic_size;
 
@@ -120,7 +174,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM 16384
+#define KERNEL_QP_NUM 128
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -347,6 +401,14 @@ void run_server(thread_params_t* params) {
 
   uint64_t lat_st, lat_ed;
   double elapsed_cycles, elapsed_time_us;
+  BwLimiter bw_limiter;
+  
+  double soft_peak_gbps = 0.0;
+  size_t soft_burst_bytes = 0;
+  size_t soft_burst_start_cycles = 0;
+  bool soft_burst_active = false;
+  
+  
   thread_barrier();
 
   while (1) {
@@ -358,6 +420,9 @@ void run_server(thread_params_t* params) {
             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
         double tput = rolling_iter / msr_seconds;
         double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
+        if(FLAGS_measure_soft_bw){
+          params->soft_peak_gbps[srv_gid] = soft_peak_gbps;
+        }
 
         clock_gettime(CLOCK_REALTIME, &run_end);
         double run_seconds =
@@ -385,6 +450,17 @@ void run_server(thread_params_t* params) {
             tot_Gbps += params->tput_Gbps[i];
           }
           hrd_red_printf("Total tput = %.2f ops,%.2f Gbps\n", tot, tot_Gbps);
+          if(FLAGS_measure_soft_bw){
+            double soft_tot = 0.0, soft_max = 0.0;
+            for (size_t i = 0; i < kAppNumServers; i++) {
+              soft_tot += params->soft_peak_gbps[i];
+              if (params->soft_peak_gbps[i] > soft_max) {
+                soft_max = params->soft_peak_gbps[i];
+              }
+            }
+            hrd_red_printf("Total software peak = %.2f Gbps, Max per-thread = %.2f Gbps\n",
+                           soft_tot, soft_max);
+          }
         }
 
         rolling_iter = 0;
@@ -450,6 +526,11 @@ void run_server(thread_params_t* params) {
       //   }
       // }
       if (!FLAGS_use_srm && !FLAGS_use_smart_rc && !FLAGS_test_lat) {
+        if (FLAGS_measure_soft_bw && soft_burst_active) {
+          soft_burst_active = false;
+          soft_burst_bytes = 0;
+          soft_burst_start_cycles = 0;
+        }
         while (nb_tx[qp_cn] >= nxt_poll_num[qp_cn] && nb_tx[qp_cn] > 0) {
           int got = ibv_poll_cq(cb->conn_cq[qp_cn], (int)kAppUnsigBatch, wc);
           if (got < 0) {
@@ -466,6 +547,11 @@ void run_server(thread_params_t* params) {
         }
        
     }else if (!FLAGS_use_srm && FLAGS_use_smart_rc && !FLAGS_test_lat) { 
+        if (FLAGS_measure_soft_bw && soft_burst_active) {
+          soft_burst_active = false;
+          soft_burst_bytes = 0;
+          soft_burst_start_cycles = 0;
+        }
        while (nb_tx[qp_cn] >= nxt_poll_num[qp_cn] && nb_tx[qp_cn] > 0) {
           int got = ibv_poll_cq(cb->conn_cq[qp_cn], (int)kAppUnsigBatch, wc);
           if (got < 0) {
@@ -516,7 +602,13 @@ void run_server(thread_params_t* params) {
         int ret_smart = smartshim::before_post_send(1, cb->conn_cq[qp_cn], wc, kAppUnsigBatch);
       }
       
+      if (FLAGS_measure_soft_bw && !soft_burst_active) {
+        soft_burst_active = true;
+        soft_burst_start_cycles = hrd_get_cycles();
+        soft_burst_bytes = 0;
+      }
 
+      bw_limiter.wait(sgl.length);
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
       // if(srv_gid == 0){
       //   lat_ed = rdtsc();
@@ -529,6 +621,16 @@ void run_server(thread_params_t* params) {
       //   }
       // }
       rt_assert(ret == 0);
+      if (FLAGS_measure_soft_bw && soft_burst_active) {
+        soft_burst_bytes += sgl.length;
+        size_t now_cycles = hrd_get_cycles();
+        double seconds =
+            (now_cycles - soft_burst_start_cycles) / measure_cycles_per_second();
+        if (seconds > 0.0) {
+          double gbps = (soft_burst_bytes * 8.0) / (seconds * 1e9);
+          if (gbps > soft_peak_gbps) soft_peak_gbps = gbps;
+        }
+      }
       rolling_iter++;
       if (FLAGS_test_lat) {
         int ret = hrd_poll_cq_ret(cb->conn_cq[qp_cn], 1, wc);
@@ -813,7 +915,7 @@ void run_server_srm(thread_params_t* params) {
   int lat_st_head = 0,lat_st_tail = 0;
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(128)) {
+      if (rolling_iter >= MB(1)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -898,7 +1000,7 @@ void run_server_srm(thread_params_t* params) {
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= KB(128)) {
+        if (rolling_iter >= MB(1)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -1693,8 +1795,8 @@ int main(int argc, char* argv[]) {
   int fd, ret;
   if(!FLAGS_is_client){
     // 初始化wqe表
-    std::ifstream infile("AliStorage2019_traffic_size.txt");
-    // std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    // std::ifstream infile("AliStorage2019_traffic_size.txt");
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);
@@ -1842,7 +1944,7 @@ int main(int argc, char* argv[]) {
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
   double tput[num_threads], tput_Gbps[num_threads];
-
+  double soft_peak_gbps[num_threads];
   // if (FLAGS_use_srm && !FLAGS_is_client) {
   //   srm_cb = new hrd_ctrl_blk_t();
   //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
@@ -1862,6 +1964,7 @@ int main(int argc, char* argv[]) {
       param_arr[i].id = i;
       param_arr[i].tput = tput;
       param_arr[i].tput_Gbps = tput_Gbps;
+      param_arr[i].soft_peak_gbps = soft_peak_gbps;
       if (!FLAGS_use_srm)
         thread_arr[i] = std::thread(run_server, &param_arr[i]);
       else {
