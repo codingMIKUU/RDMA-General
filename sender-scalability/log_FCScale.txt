@@ -1,9 +1,29 @@
-avg_cpu_cycles 949
-avg_cpu_cycles 946
-avg_cpu_cycles 947
-avg_cpu_cycles 947
-avg_cpu_cycles 946
-avg_cpu_cycles 944
-avg_cpu_cycles 946
-avg_cpu_cycles 947
-avg_cpu_cycles 949
+avg_cpu_cycles 956, post send cycles 383
+avg_cpu_cycles 955, post send cycles 381
+avg_cpu_cycles 1024, post send cycles 444
+avg_cpu_cycles 956, post send cycles 381
+avg_cpu_cycles 961, post send cycles 385
+avg_cpu_cycles 961, post send cycles 385
+avg_cpu_cycles 959, post send cycles 384
+avg_cpu_cycles 956, post send cycles 381
+avg_cpu_cycles 959, post send cycles 384
+avg_cpu_cycles 958, post send cycles 383
+avg_cpu_cycles 956, post send cycles 382
+avg_cpu_cycles 957, post send cycles 383
+avg_cpu_cycles 1042, post send cycles 462
+avg_cpu_cycles 1019, post send cycles 440
+avg_cpu_cycles 1041, post send cycles 462
+avg_cpu_cycles 1072, post send cycles 498
+avg_cpu_cycles 1157, post send cycles 579
+avg_cpu_cycles 1154, post send cycles 576
+avg_cpu_cycles 1153, post send cycles 576
+avg_cpu_cycles 1153, post send cycles 576
+avg_cpu_cycles 1153, post send cycles 576
+avg_cpu_cycles 1144, post send cycles 574
+avg_cpu_cycles 1154, post send cycles 576
+avg_cpu_cycles 1151, post send cycles 575
+avg_cpu_cycles 1144, post send cycles 574
+avg_cpu_cycles 1145, post send cycles 574
+avg_cpu_cycles 1146, post send cycles 575
+avg_cpu_cycles 1146, post send cycles 575
+avg_cpu_cycles 1145, post send cycles 575

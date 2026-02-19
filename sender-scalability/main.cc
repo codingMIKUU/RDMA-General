@@ -40,9 +40,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 2;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 32;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -159,6 +159,9 @@ struct xrc_table_entry {
   uint64_t cur_Gbps;
   uint64_t cur_lat_us;
 } __cacheline_aligned;  // 对齐到多少字节？
+struct aligned_u32{
+  uint32_t val;
+}__cacheline_aligned;
 
 
 
@@ -174,7 +177,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM 128
+#define KERNEL_QP_NUM 16384
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -185,9 +188,9 @@ struct user_table_info {
 #define HASH_TABLE_SIZE (sizeof(hash_table_entry) * HASH_TABLE_ENTRY_NUM)
 
 #define TABLE_SIZE                                                   \
-  (sizeof(uint32_t) * (kAppNumServers + FLAGS_test_lat_thread) * NUM_LEVEL * \
+  (sizeof(aligned_u32) * (kAppNumServers + FLAGS_test_lat_thread) * NUM_LEVEL * \
    NUM_SCHED)  // 表大小（页对齐，4KB=1页）
-#define LEVEL_TABLE_SIZE (sizeof(uint32_t) * NUM_LEVEL * NUM_SCHED)
+#define LEVEL_TABLE_SIZE (sizeof(aligned_u32) * NUM_LEVEL * NUM_SCHED)
 
 #define KQP_NUM_PER_THREAD (KERNEL_QP_NUM / kAppNumServers)
 
@@ -205,7 +208,7 @@ const static int golden_step =
     (int)(HASH_TABLE_KEY_NUM * 0.618 + 0.5) +
     ((int)(HASH_TABLE_KEY_NUM * 0.618 + 0.5) % 2 == 0);
 
-uint32_t *wqe_table, *level_table;
+struct aligned_u32 *wqe_table, *level_table;
 
 struct xrc_table_entry (*xrc_table)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD];
 uint64_t xrc_tot_bytes[kAppNumServers + 1][NUM_SCHED][KQP_NUM_PER_THREAD];
@@ -287,7 +290,7 @@ void print_qp_info(struct hrd_qp_attr_t* info) {
   printf("addr: %lu\n", info->buf_addr);
 }
 
-std::vector<uint64_t>cpu_cycles;
+std::vector<uint64_t>cpu_cycles,ps_cycles;
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
@@ -595,9 +598,14 @@ void run_server(thread_params_t* params) {
       if (FLAGS_test_lat) {
         clock_gettime(CLOCK_REALTIME, &lat_start);
       }
+      
+      // //文件
       // if(srv_gid == 0){
       //   lat_st = rdtsc();
+      //   wr.wr_id = 114514;
       // }
+
+
       if(!FLAGS_use_srm && FLAGS_use_smart_rc){
         int ret_smart = smartshim::before_post_send(1, cb->conn_cq[qp_cn], wc, kAppUnsigBatch);
       }
@@ -610,6 +618,8 @@ void run_server(thread_params_t* params) {
 
       bw_limiter.wait(sgl.length);
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+
+      // //文件
       // if(srv_gid == 0){
       //   lat_ed = rdtsc();
       //   cpu_cycles.push_back(lat_ed - lat_st);
@@ -620,6 +630,7 @@ void run_server(thread_params_t* params) {
       //        cpu_cycles.clear();
       //   }
       // }
+
       rt_assert(ret == 0);
       if (FLAGS_measure_soft_bw && soft_burst_active) {
         soft_burst_bytes += sgl.length;
@@ -1126,11 +1137,17 @@ void run_server_srm(thread_params_t* params) {
 
         // printf("ready to post send, rolling_iter%d\n",rolling_iter);
 
+        // //文件
         // if(srv_gid == 0)
         //   lat_st = rdtsc();
+
+        
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
 
-
+        // //文件
+        // uint64_t ps_ed ;
+        // if(srv_gid == 0)
+        //   ps_ed = rdtsc();
 
 
         if(group_idx == 0){
@@ -1206,24 +1223,28 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-          wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-            srv_gid + sched_idx * tot_qp_nums,
+          &wqe_table[group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
+            srv_gid + sched_idx * tot_qp_nums].val,
           1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
         // __atomic_thread_fence(_file);
 
-        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL], 1,
+        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL].val, 1,
                 __ATOMIC_RELEASE);
 
+        //文件
         // if(srv_gid == 0){
         //   lat_ed = rdtsc();
         //   cpu_cycles.push_back(lat_ed - lat_st);
+        //   ps_cycles.push_back(ps_ed - lat_st);
         //   if(cpu_cycles.size()>=5000000){
         //       uint64_t avg_cpu_cycles = std::accumulate(cpu_cycles.begin(),cpu_cycles.end(),0LL)/cpu_cycles.size(); 
-        //       fprintf(log_file,"avg_cpu_cycles %llu\n", avg_cpu_cycles);
+        //       uint64_t avg_ps_cycles = std::accumulate(ps_cycles.begin(),ps_cycles.end(),0LL)/ps_cycles.size();
+        //       fprintf(log_file,"avg_cpu_cycles %llu, post send cycles %llu\n", avg_cpu_cycles, avg_ps_cycles);
         //       fflush(log_file);
         //       cpu_cycles.clear();
+        //       ps_cycles.clear();
         //   }
         // }
         
@@ -1393,14 +1414,14 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-          wqe_table + group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-            srv_gid + sched_idx * tot_qp_nums,
+          &wqe_table[group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
+            srv_gid + sched_idx * tot_qp_nums].val,
           1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
         // __atomic_thread_fence(__ATOMIC_RELEASE);
 
-        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL], 1,
+        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL].val, 1,
                 __ATOMIC_RELEASE);
 
         // ed_lat = rdtsc();
@@ -1839,14 +1860,14 @@ int main(int argc, char* argv[]) {
       }
 
       // 2. 初始化表数据
-      wqe_table = (uint32_t*)table;
-      for (int i = 0; i < TABLE_SIZE / sizeof(uint32_t); i++) {
-        wqe_table[i] = 0;
+      wqe_table = (aligned_u32*)table;
+      for (int i = 0; i < TABLE_SIZE / sizeof(aligned_u32); i++) {
+        wqe_table[i].val = 0;
       }
 
-      level_table = (uint32_t*)l_table;
-      for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(uint32_t); i++) {
-        level_table[i] = 0;
+      level_table = (aligned_u32*)l_table;
+      for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(aligned_u32); i++) {
+        level_table[i].val = 0;
       }
 
       xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
@@ -1913,8 +1934,9 @@ int main(int argc, char* argv[]) {
       }
     }
   }
+  //文件
   // char filename[64] ;
-  // sprintf(filename, "log_FCScale_ps.txt");
+  // sprintf(filename, "log_FCScale.txt");
   // log_file = fopen(filename, "w");
   // if(log_file == NULL){
   //   perror("fopen失败");
@@ -1987,6 +2009,7 @@ int main(int argc, char* argv[]) {
     // 关闭内核设备
     close(fd);
   }
-  //fclose(log_file);
+  // //文件
+  // fclose(log_file);
   return 0;
 }
