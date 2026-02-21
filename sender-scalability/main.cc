@@ -39,10 +39,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 2;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 128;
+static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -141,6 +141,9 @@ uint64_t seed_array[kAppNumServers + 1];
 std::mutex barrier_mutex;            // 互斥锁保护
 std::condition_variable barrier_cv;  // 条件变量
 int barrier_count = 0;               // 到达线程墙的线程计数
+std::mutex shared_mutex;             // 共享cb和pd的互斥锁
+std::condition_variable shared_cv;   // 共享cb和pd的条件变量
+bool shared_ready = false;           // 共享cb和pd是否准备好
 // 线程墙实现
 
 // 与内核模块一致的定义
@@ -158,6 +161,7 @@ struct xrc_table_entry {
 
   uint64_t cur_Gbps;
   uint64_t cur_lat_us;
+  uint64_t update_cnt;
 } __cacheline_aligned;  // 对齐到多少字节？
 struct aligned_u32{
   uint32_t val;
@@ -177,7 +181,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM 16384
+#define KERNEL_QP_NUM 128
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -314,9 +318,24 @@ void run_server(thread_params_t* params) {
   // if(FLAGS_use_xrc)
   //   conn_config.sq_depth = kHrdSQDepth*10;
 
+  // if (srv_gid == 0) {
+  //   srm_cb = new hrd_ctrl_blk_t();
+  //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+  //   hrd_resolve_port_index(srm_cb, 0);
+  //   srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+  //   {
+  //       std::unique_lock<std::mutex> lock(shared_mutex);
+  //       shared_ready = true;
+  //       shared_cv.notify_all();
+  //   }
+  // } else {
+  //   std::unique_lock<std::mutex> lock(shared_mutex);
+  //   shared_cv.wait(lock, []{ return shared_ready; });
+  // }
+
   hrd_ctrl_blk_t* cb;
   if (conn_config.use_xrc == 0)
-    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,NULL,NULL);
+    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,srm_cb,srm_pd);
   else
     cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 0, &conn_config, nullptr,
                                0);
@@ -578,7 +597,7 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      // real_sz = 512;
+      //real_sz = 8;
       tot_sz += real_sz;
 
       sgl.addr =
@@ -783,6 +802,21 @@ void run_server_srm(thread_params_t* params) {
     barrier_cv.wait(lock, [&]() { return barrier_count == srv_gid; });
   }
 
+  // if (srv_gid == 0) {
+  //   srm_cb = new hrd_ctrl_blk_t();
+  //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+  //   hrd_resolve_port_index(srm_cb, 0);
+  //   srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+  //   {
+  //       std::unique_lock<std::mutex> lock(shared_mutex);
+  //       shared_ready = true;
+  //       shared_cv.notify_all();
+  //   }
+  // } else {
+  //   std::unique_lock<std::mutex> lock(shared_mutex);
+  //   shared_cv.wait(lock, []{ return shared_ready; });
+  // }
+
   cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 0, &conn_config, nullptr,
                              conn_config.is_client, srm_cb, srm_pd);
   //cb->ahs = new ibv_ah*[kAppNumClientMachines];
@@ -960,7 +994,8 @@ void run_server_srm(thread_params_t* params) {
             tot_Gbps += params->tput_Gbps[i];
           }
 
-          xrc_table[srv_gid][0][0].cur_Gbps = tot_Gbps;
+          __atomic_store_n(&xrc_table[srv_gid][0][0].cur_Gbps, tot_Gbps, __ATOMIC_RELAXED);
+          __atomic_fetch_add(&xrc_table[srv_gid][0][0].update_cnt, 1, __ATOMIC_RELEASE);
           hrd_red_printf("Total tput = %.2f ops,%.2f Gbps\n", tot, tot_Gbps);
         }
 
@@ -1044,6 +1079,9 @@ void run_server_srm(thread_params_t* params) {
               tot += params->tput[i];
               tot_Gbps += params->tput_Gbps[i];
             }
+
+            __atomic_store_n(&xrc_table[srv_gid][0][0].cur_Gbps, tot_Gbps, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&xrc_table[srv_gid][0][0].update_cnt, 1, __ATOMIC_RELEASE);
             hrd_red_printf("Total tput = %.2f ops,%.2f Gbps\n", tot, tot_Gbps);
           }
 
@@ -1273,7 +1311,9 @@ void run_server_srm(thread_params_t* params) {
         lats.clear();
         rolling_iter = 0;
 
-        xrc_table[srv_gid][0][0].cur_lat_us = avg;
+        
+        __atomic_store_n(&xrc_table[srv_gid][0][0].cur_lat_us, avg, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&xrc_table[srv_gid][0][0].update_cnt, 1, __ATOMIC_RELEASE);
       }
       
 
@@ -1518,6 +1558,14 @@ void run_client(thread_params_t* params) {
     memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
     hrd_resolve_port_index(srm_cb, 0);
     srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+    {
+        std::unique_lock<std::mutex> lock(shared_mutex);
+        shared_ready = true;
+        shared_cv.notify_all();
+    }
+  } else {
+    std::unique_lock<std::mutex> lock(shared_mutex);
+    shared_cv.wait(lock, []{ return shared_ready; });
   }
   if (conn_config.use_xrc)
     cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,
@@ -1666,10 +1714,25 @@ void run_client_srm(thread_params_t* params) {
     barrier_cv.wait(lock, [&]() { return barrier_count == clt_gid; });
   }
 
+  if (clt_gid == 0) {
+    srm_cb = new hrd_ctrl_blk_t();
+    memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+    hrd_resolve_port_index(srm_cb, 0);
+    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+    {
+        std::unique_lock<std::mutex> lock(shared_mutex);
+        shared_ready = true;
+        shared_cv.notify_all();
+    }
+  } else {
+    std::unique_lock<std::mutex> lock(shared_mutex);
+    shared_cv.wait(lock, []{ return shared_ready; });
+  }
+
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
   cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,
-                             conn_config.is_client, nullptr, nullptr);
+                             conn_config.is_client, srm_cb, srm_pd);
   
   clt_thread_barrier();
   // Set to zero value so the server can detect WRITE completion
@@ -1965,8 +2028,8 @@ int main(int argc, char* argv[]) {
   std::vector<thread_params_t> param_arr(num_threads);
   std::vector<std::thread> thread_arr(num_threads);
   // auto* tput = new double[num_threads];
-  double tput[num_threads], tput_Gbps[num_threads];
-  double soft_peak_gbps[num_threads];
+  double tput[num_threads] = {0}, tput_Gbps[num_threads] = {0};
+  double soft_peak_gbps[num_threads] = {0};
   // if (FLAGS_use_srm && !FLAGS_is_client) {
   //   srm_cb = new hrd_ctrl_blk_t();
   //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));

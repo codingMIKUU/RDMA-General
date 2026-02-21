@@ -50,7 +50,7 @@ void run_server(thread_params_t* params) {
   conn_config.buf_shm_key = -1;
 
   auto* cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, kHrdInvalidNUMANode,
-                               &conn_config, nullptr);
+                               &conn_config, nullptr, nullptr, nullptr);
 
   struct hrd_ctrl_blk* cb =
       hrd_ctrl_blk_init(srv_gid,            /* local_hid */

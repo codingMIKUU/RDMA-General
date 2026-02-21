@@ -240,7 +240,7 @@ void run_worker(thread_params_t* params) {
   conn_config.sq_depth = FLAGS_sq_depth;
   conn_config.max_rd_atomic = FLAGS_max_rd_atomic;
   tl_cb = hrd_ctrl_blk_init(tl_params.wrkr_gid, ib_port_index, FLAGS_numa_node,
-                            &conn_config, nullptr);
+                            &conn_config, nullptr, nullptr, nullptr);
 
   // Zero-out the READ polling region; non-zero the rest.
   memset(const_cast<uint8_t*>(tl_cb->conn_buf), 0, polling_region_size);

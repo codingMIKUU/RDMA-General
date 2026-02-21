@@ -39,7 +39,7 @@ void run_client(thread_params_t* params) {
   dgram_config.buf_shm_key = -1;
 
   auto* cb = hrd_ctrl_blk_init(clt_local_hid, ib_port_index,
-                               kHrdInvalidNUMANode, nullptr, &dgram_config);
+                               kHrdInvalidNUMANode, nullptr, &dgram_config, nullptr, nullptr);
 
   // Buffer to receive responses into
   memset(const_cast<uint8_t*>(cb->dgram_buf), 0, kAppBufSize);
@@ -138,7 +138,7 @@ void run_server(thread_params_t* params) {
   dgram_config.buf_shm_key = -1;
 
   auto* cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, kHrdInvalidNUMANode,
-                               nullptr, &dgram_config);
+                               nullptr, &dgram_config, nullptr, nullptr);
 
   // Buffer to receive requests into
   memset(const_cast<uint8_t*>(cb->dgram_buf), 0, kAppBufSize);

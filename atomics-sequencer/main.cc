@@ -43,7 +43,7 @@ void* run_server(thread_params_t* params) {
 
     cb[i] = hrd_ctrl_blk_init(srv_gid + i,       // local hid
                               ib_port_index, 0,  // port index, numa node id
-                              &conn_config, nullptr);
+                              &conn_config, nullptr, nullptr, nullptr);
 
     // Register all created QPs - only some will get used!
     for (size_t j = 0; j < total_srv_qps; j++) {
@@ -111,7 +111,7 @@ void* run_client(thread_params_t* params) {
   conn_config.buf_shm_key = -1;
 
   hrd_ctrl_blk_t* cb =
-      hrd_ctrl_blk_init(clt_gid, ib_port_index, 9, &conn_config, nullptr);
+      hrd_ctrl_blk_init(clt_gid, ib_port_index, 9, &conn_config, nullptr, nullptr, nullptr);
 
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, 4096);
 

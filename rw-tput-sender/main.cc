@@ -55,7 +55,7 @@ void run_server(thread_params_t* params) {
   conn_config.buf_shm_key = -1;
 
   auto* cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, kHrdInvalidNUMANode,
-                               &conn_config, nullptr);
+                               &conn_config, nullptr, nullptr, nullptr);
 
   memset(const_cast<uint8_t*>(cb->conn_buf), static_cast<uint8_t>(srv_gid) + 1,
          kAppBufSize);
@@ -173,7 +173,7 @@ void run_client(thread_params_t* params) {
   conn_config.buf_shm_key = -1;
 
   auto* cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, kHrdInvalidNUMANode,
-                               &conn_config, nullptr);
+                               &conn_config, nullptr, nullptr, nullptr);
 
   char srv_name[kAppNumQPs][kHrdQPNameSize];
   for (size_t i = 0; i < kAppNumQPs; i++) {

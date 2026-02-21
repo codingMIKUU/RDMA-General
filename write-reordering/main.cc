@@ -31,7 +31,7 @@ void run_server() {
   conn_config.buf_shm_key = 3185;
 
   auto* cb = hrd_ctrl_blk_init(0 /* id */, 0 /* port */, 0 /* numa */,
-                               &conn_config, nullptr /* dgram config */);
+                               &conn_config, nullptr /* dgram config */, nullptr, nullptr);
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
 
   hrd_publish_conn_qp(cb, 0, "server");
@@ -92,7 +92,7 @@ void run_client() {
   conn_config.buf_shm_key = 3185;
 
   auto* cb = hrd_ctrl_blk_init(0 /* id */, 0 /* port */, 0 /* numa */,
-                               &conn_config, nullptr /* dgram config */);
+                               &conn_config, nullptr /* dgram config */, nullptr, nullptr);
 
   hrd_publish_conn_qp(cb, 0, "client");
   printf("main: Client published. Waiting for server.\n");
