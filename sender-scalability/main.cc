@@ -39,10 +39,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 128;
-static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumClients = 8;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -181,7 +181,7 @@ struct user_table_info {
   size_t xrc_qp_num_per_srm;
 };
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM 128
+#define KERNEL_QP_NUM 64
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -219,7 +219,7 @@ uint64_t xrc_tot_bytes[kAppNumServers + 1][NUM_SCHED][KQP_NUM_PER_THREAD];
 
 int kqp_idx_arr[kAppNumServers + 1][KQP_NUM_PER_THREAD];
 
-#define KQP_WQE_LIMIT 256 //记得要和驱动同步
+#define KQP_WQE_LIMIT 128 //记得要和驱动同步
 int kqp_cnt[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL][KQP_NUM_PER_THREAD]; 
 int free_kqp_cnt[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL];
 int free_kqp_idx[kAppNumServers + 1][NUM_SCHED*NUM_LEVEL][KQP_NUM_PER_THREAD];
@@ -597,7 +597,9 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      //real_sz = 8;
+      // if(hrd_fastrand(&seed)%2==1) real_sz =304;
+      // else real_sz = KB(4);
+      // real_sz = 32;
       tot_sz += real_sz;
 
       sgl.addr =
@@ -674,7 +676,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(128)) {
+      if (rolling_iter >= KB(8)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1122,7 +1124,8 @@ void run_server_srm(thread_params_t* params) {
 
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
-        //real_sz = 512;
+        // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
+        // else real_sz = 304;
 
 
         tot_sz += real_sz;
@@ -1299,7 +1302,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(256)) {
+      if (rolling_iter >= KB(100)) {//srm时延
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1901,7 +1904,7 @@ int main(int argc, char* argv[]) {
       if (table == MAP_FAILED) {
         perror("wqe table mmap失败");
         return -1;
-      }
+      } 
 
       void* l_table =
           mmap(NULL, LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,

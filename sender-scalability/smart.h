@@ -6,10 +6,10 @@ namespace smartshim {
 
 struct Config {
   bool throttler = true;
-  bool throttler_auto_tuning = true;
-  int  initial_credit = 4;//12
+  bool throttler_auto_tuning = false;//为true表示自适应调整积分
+  int  initial_credit = 2;//12
   int  credit_step = 2;//8
-  int  max_credit =12;//48
+  int  max_credit =2;//48
   int  execution_epochs = 60;
   uint64_t sample_cycles = 19200000;
   double inf_credit_weight = 1.05;
