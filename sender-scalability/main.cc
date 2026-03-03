@@ -12,6 +12,7 @@
 #include <condition_variable>
 #include <fstream>
 #define CPU_FREQUENCY_HZ 2900000000.0
+#define NUM_SCHED 1
 static constexpr size_t kAppBufSize = MB(2);
 static constexpr int kAppBaseSHMKey = 2;
 
@@ -33,7 +34,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 512;
+static constexpr size_t kAppUnsigBatch = 64;
 //static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -610,7 +611,7 @@ void run_server_srm(thread_params_t* params) {
       wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
       wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
 
-      wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
+      wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % NUM_SCHED;//测试多核
       // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
       nb_tx[qp_cn]++;
       if(FLAGS_test_lat){
@@ -679,7 +680,7 @@ void run_server_srm(thread_params_t* params) {
         wr.qp_type.srm.remote_gid.global.interface_id = clt_qp[cn]->gid.global.interface_id;
         wr.qp_type.srm.remote_gid.global.subnet_prefix = clt_qp[cn]->gid.global.subnet_prefix;
 
-        wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
+        wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % NUM_SCHED;//测试多核
         // printf("interface_id:0x%llx, subnet_prefix:0x%llx\n",wr.qp_type.srm.remote_gid.global.interface_id,wr.qp_type.srm.remote_gid.global.subnet_prefix);
         nb_tx[qp_cn]++;
 
@@ -1011,7 +1012,7 @@ int main(int argc, char* argv[]) {
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
     //初始化wqe表
-    std::ifstream infile("AliStorage2019_traffic_size.txt");
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while(infile>>val){
       traffic_size.push_back(val);
