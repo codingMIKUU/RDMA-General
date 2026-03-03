@@ -40,9 +40,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 8;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -149,6 +149,16 @@ bool shared_ready = false;           // 共享cb和pd是否准备好
 // 与内核模块一致的定义
 #define BRIDGE_IOCTL_MAGIC 'B'
 #define REG_TABLE_TO_MLX5 _IOW(BRIDGE_IOCTL_MAGIC, 0x01, struct user_table_info)
+#define ALLOC_APP_TABLE _IOWR(BRIDGE_IOCTL_MAGIC, 0x02, struct app_table_alloc_req)
+
+#define BRIDGE_MMAP_WQE_OFFSET (0ULL)
+#define BRIDGE_MMAP_LEVEL_OFFSET (1ULL << 30)
+#define BRIDGE_MMAP_XRC_OFFSET (2ULL << 30)
+
+#define SRM_AUTO_APP_ID 0xffffffffU
+#define KERN_MAX_USER_THREADS 17
+#define KERN_MAX_APP 64
+#define MAX_USER_XRC_QP_PER_SRM 1024
 
 #define __cacheline_aligned __attribute__((__aligned__(64)))
 
@@ -180,8 +190,23 @@ struct user_table_info {
 
   size_t xrc_qp_num_per_srm;
 };
+
+struct app_table_alloc_req {
+  uint32_t app_id;
+  uint32_t app_threads;
+  uint32_t xrc_qp_num_per_srm;
+  uint32_t flags;
+
+  uint64_t wqe_table_offset;
+  uint64_t level_table_offset;
+  uint64_t xrc_table_offset;
+
+  uint64_t wqe_table_span;
+  uint64_t level_table_span;
+  uint64_t xrc_table_span;
+};
 #define NUM_LEVEL 2
-#define KERNEL_QP_NUM 64
+#define KERNEL_QP_NUM 256
 #define HASH_TABLE_KEY_NUM (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM_PER_BUCKET (kAppUnsigBatch * 2)
 #define HASH_TABLE_ENTRY_NUM HASH_TABLE_KEY_NUM* HASH_TABLE_ENTRY_NUM_PER_BUCKET
@@ -201,6 +226,10 @@ struct user_table_info {
 
 #define XRC_TABLE_SIZE ((kAppNumServers + FLAGS_test_lat_thread)*(NUM_LEVEL*NUM_SCHED) \
         *KQP_NUM_PER_THREAD *sizeof(struct xrc_table_entry))
+
+#define BRIDGE_WQE_TABLE_SIZE (sizeof(aligned_u32) * KERN_MAX_USER_THREADS * NUM_LEVEL * NUM_SCHED)
+#define BRIDGE_LEVEL_TABLE_SIZE (sizeof(aligned_u32) * KERN_MAX_APP * NUM_LEVEL * NUM_SCHED)
+#define BRIDGE_XRC_TABLE_SIZE (sizeof(struct xrc_table_entry) * KERN_MAX_USER_THREADS * NUM_LEVEL * NUM_SCHED * MAX_USER_XRC_QP_PER_SRM)
 
 // FNV-1a算法的初始偏移量和质数（针对32位哈希）
 #define FNV1A_INIT 0x811c9dc5UL
@@ -952,8 +981,6 @@ void run_server_srm(thread_params_t* params) {
   double tot_sz = 0;
   int sched_idx;
   int group_idx;
-  int tot_qp_nums =
-      (kAppNumServers + FLAGS_test_lat_thread) * NUM_LEVEL;  // 用户态qp单内核线程总数
 
   thread_barrier();
 
@@ -1264,8 +1291,8 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-          &wqe_table[group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-            srv_gid + sched_idx * tot_qp_nums].val,
+          &wqe_table[srv_gid * (NUM_LEVEL * NUM_SCHED) +
+            group_idx * NUM_SCHED + sched_idx].val,
           1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
@@ -1457,8 +1484,8 @@ void run_server_srm(thread_params_t* params) {
 
         // 对4KB以上的等级，采用原先等级表+数量表的方式
         __atomic_fetch_add(
-          &wqe_table[group_idx * (kAppNumServers + FLAGS_test_lat_thread) +
-            srv_gid + sched_idx * tot_qp_nums].val,
+          &wqe_table[srv_gid * (NUM_LEVEL * NUM_SCHED) +
+            group_idx * NUM_SCHED + sched_idx].val,
           1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
 
         // // 插入释放屏障：确保c的更新先于b的更新被可见
@@ -1894,49 +1921,70 @@ int main(int argc, char* argv[]) {
     if(FLAGS_use_srm){
       // mmap表
       
-      struct user_table_info info;
+      struct app_table_alloc_req req;
+      void* wqe_map;
+      void* level_map;
+      void* xrc_map;
 
-      // 1. 分配页对齐的用户态内存（表）
-      void* table =
-          mmap(NULL, TABLE_SIZE, PROT_READ | PROT_WRITE,
-              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-              -1, 0);
-      if (table == MAP_FAILED) {
-        perror("wqe table mmap失败");
-        return -1;
-      } 
-
-      void* l_table =
-          mmap(NULL, LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,
-              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-              -1, 0);
-      if (l_table == MAP_FAILED) {
-        perror("level table mmap失败");
-        munmap(table, TABLE_SIZE);
+      fd = open(DEV_PATH, O_RDWR);
+      if (fd < 0) {
+        perror("打开设备失败");
         return -1;
       }
 
-      void * x_table = 
-          mmap(NULL, XRC_TABLE_SIZE, PROT_READ | PROT_WRITE,
-              MAP_ANONYMOUS | MAP_SHARED | MAP_LOCKED,  // 锁定内存不被换出
-              -1, 0);
-      if(x_table == MAP_FAILED){
-        perror("xrc table mmap失败");
+      wqe_map = mmap(NULL, BRIDGE_WQE_TABLE_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, fd, BRIDGE_MMAP_WQE_OFFSET);
+      if (wqe_map == MAP_FAILED) {
+        perror("wqe共享表mmap失败");
+        close(fd);
         return -1;
       }
 
-      // 2. 初始化表数据
-      wqe_table = (aligned_u32*)table;
+      level_map = mmap(NULL, BRIDGE_LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, fd, BRIDGE_MMAP_LEVEL_OFFSET);
+      if (level_map == MAP_FAILED) {
+        perror("level共享表mmap失败");
+        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
+        close(fd);
+        return -1;
+      }
+
+      xrc_map = mmap(NULL, BRIDGE_XRC_TABLE_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, fd, BRIDGE_MMAP_XRC_OFFSET);
+      if (xrc_map == MAP_FAILED) {
+        perror("xrc共享表mmap失败");
+        munmap(level_map, BRIDGE_LEVEL_TABLE_SIZE);
+        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
+        close(fd);
+        return -1;
+      }
+
+      memset(&req, 0, sizeof(req));
+      req.app_id = SRM_AUTO_APP_ID;
+      req.app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
+      req.xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
+
+      ret = ioctl(fd, ALLOC_APP_TABLE, &req);
+      if (ret < 0) {
+        perror("ALLOC_APP_TABLE失败");
+        munmap(xrc_map, BRIDGE_XRC_TABLE_SIZE);
+        munmap(level_map, BRIDGE_LEVEL_TABLE_SIZE);
+        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
+        close(fd);
+        return -1;
+      }
+
+      wqe_table = (aligned_u32*)((uint8_t*)wqe_map + req.wqe_table_offset);
+      level_table = (aligned_u32*)((uint8_t*)level_map + req.level_table_offset);
+      xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])
+                  ((uint8_t*)xrc_map + req.xrc_table_offset);
+
       for (int i = 0; i < TABLE_SIZE / sizeof(aligned_u32); i++) {
         wqe_table[i].val = 0;
       }
-
-      level_table = (aligned_u32*)l_table;
       for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(aligned_u32); i++) {
         level_table[i].val = 0;
       }
-
-      xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])x_table;
 
       for(int i= 0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
         for(int j=0;j<NUM_LEVEL*NUM_SCHED;j++){
@@ -1947,40 +1995,6 @@ int main(int argc, char* argv[]) {
         }
       }
 
-      info.table_addr = table;
-      info.table_size = TABLE_SIZE;
-      info.level_table_addr = l_table;
-      info.level_table_size = LEVEL_TABLE_SIZE;
-
-      info.xrc_table_addr = x_table;
-      info.xrc_table_size = XRC_TABLE_SIZE;
-      info.xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
-
-
-
-
-
-
-
-
-      // 3. 打开内核设备
-      fd = open(DEV_PATH, O_RDWR);
-      if (fd < 0) {
-        perror("打开设备失败");
-        munmap(table, TABLE_SIZE);
-        munmap(l_table, LEVEL_TABLE_SIZE);
-        return -1;
-      }
-
-      // 4. 通过ioctl传递表信息给内核
-      ret = ioctl(fd, REG_TABLE_TO_MLX5, &info);
-      if (ret < 0) {
-        perror("ioctl失败");
-        close(fd);
-        munmap(table, TABLE_SIZE);
-        munmap(l_table, LEVEL_TABLE_SIZE);
-        return -1;
-      }
 
       // 初始化kqp_idx_arr表
       memset(kqp_idx_arr, -1, sizeof(kqp_idx_arr));
