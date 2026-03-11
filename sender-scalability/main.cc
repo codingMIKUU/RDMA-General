@@ -42,7 +42,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 128;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -814,7 +814,11 @@ void run_server_srm(thread_params_t* params) {
   int clt_num_threads = kAppNumClients / kAppNumClientMachines;
 
   hrd_conn_config_t conn_config;
-  conn_config.num_qps = NUM_LEVEL * NUM_SCHED;
+  conn_config.num_qps =
+      (FLAGS_use_xrc ? kAppNumClientMachines : kAppNumClients);
+  if (srv_gid == kAppNumServers && FLAGS_test_lat_thread) {
+    conn_config.num_qps = 1;
+  }
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
@@ -823,6 +827,15 @@ void run_server_srm(thread_params_t* params) {
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
   conn_config.kqp_num_per_thread = KQP_NUM_PER_THREAD;
+  conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
+  conn_config.srm_max_app = KERN_MAX_APP;
+  conn_config.srm_num_level = NUM_LEVEL;
+  conn_config.srm_num_sched = NUM_SCHED;
+  conn_config.srm_max_xrc_qp_per_srm = MAX_USER_XRC_QP_PER_SRM;
+  conn_config.srm_xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
+  conn_config.srm_wqe_table_bytes = BRIDGE_WQE_TABLE_SIZE;
+  conn_config.srm_level_table_bytes = BRIDGE_LEVEL_TABLE_SIZE;
+  conn_config.srm_xrc_table_bytes = BRIDGE_XRC_TABLE_SIZE;
 
   hrd_ctrl_blk_t* cb;
 
@@ -854,76 +867,98 @@ void run_server_srm(thread_params_t* params) {
   // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
-  hrd_qp_attr_t* clt_qp[kAppNumClients][NUM_SCHED*NUM_LEVEL];
+  if (srv_gid == 0) {
+    rt_assert(cb->conn_qp[0]->srm_wqe_table != nullptr,
+              "SRM wqe table is null");
+    rt_assert(cb->conn_qp[0]->srm_level_table != nullptr,
+              "SRM level table is null");
+    rt_assert(cb->conn_qp[0]->srm_xrc_table != nullptr,
+              "SRM xrc table is null");
+
+    wqe_table = reinterpret_cast<aligned_u32*>(cb->conn_qp[0]->srm_wqe_table);
+    level_table = reinterpret_cast<aligned_u32*>(cb->conn_qp[0]->srm_level_table);
+    xrc_table = reinterpret_cast<xrc_table_entry (*)[NUM_LEVEL * NUM_SCHED][KQP_NUM_PER_THREAD]>(
+        cb->conn_qp[0]->srm_xrc_table);
+
+    for (int i = 0; i < TABLE_SIZE / sizeof(aligned_u32); i++) {
+      wqe_table[i].val = 0;
+    }
+    for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(aligned_u32); i++) {
+      level_table[i].val = 0;
+    }
+    for (int i = 0; i < (kAppNumServers + FLAGS_test_lat_thread); i++) {
+      for (int j = 0; j < NUM_LEVEL * NUM_SCHED; j++) {
+        for (int k = 0; k < KQP_NUM_PER_THREAD; k++) {
+          xrc_table[i][j][k].ctrl = 0;
+          xrc_table[i][j][k].tot_bytes = 0;
+        }
+      }
+    }
+  }
+
+  hrd_qp_attr_t* clt_qp[kAppNumClients];
   if (srv_gid != kAppNumServers) {
     for (size_t i = 0; i < kAppNumClients; i++) {
-      for(size_t j = 0;j<conn_config.num_qps;j++){
-        char srv_qp_name[kHrdQPNameSize];
-        sprintf(srv_qp_name, "server-%zu-%zu-%zu", srv_gid, i,j);
-        hrd_publish_conn_qp_srm(cb,j,-1,srv_qp_name);
-      }
-
+      char srv_qp_name[kHrdQPNameSize];
+      sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, i);
+      size_t local_qp_idx = conn_config.use_xrc ? (i / clt_num_threads) : i;
+      hrd_publish_conn_qp_srm(cb, local_qp_idx, -1, srv_qp_name);
     }
 
     for (size_t i = 0; i < kAppNumClients; i++) {
-      for(size_t j = 0;j<conn_config.num_qps;j++){
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", i,srv_gid,j);
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", i, srv_gid);
 
-        clt_qp[i][j] = nullptr;
-        while (clt_qp[i][j] == nullptr) {
-          clt_qp[i][j] = hrd_get_published_qp(clt_qp_name);
-          if (clt_qp[i][j] == nullptr) usleep(20000);
-        }
-
-        if (i % clt_num_threads == 0) {
-          printf("main: Server %zu found client %zu's %zu qp! Connecting..\n", srv_gid, i, j);
-          int ret = hrd_connect_qp_srm(cb, j, clt_qp[i][j]);
-          if (ret == -1) {
-            hrd_ctrl_blk_destroy_srm(cb);
-            printf("srm failed creating,删用户态资源\n");
-            return;
-          }
-          hrd_wait_till_ready(clt_qp_name);
-        }
-        printf("服务端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
-              clt_qp[i][j]->rkey);
-        }
-    }
-  } else {
-    // test lat thread
-    for (size_t i = 0; i < 1; i++) {
-      for(size_t j = 0;j<conn_config.num_qps;j++){
-        char srv_qp_name[kHrdQPNameSize];
-        sprintf(srv_qp_name, "server-%zu-%zu-%zu", srv_gid,kAppNumClients,j);
-        hrd_publish_conn_qp_srm(cb, j,-1,srv_qp_name);
+      clt_qp[i] = nullptr;
+      while (clt_qp[i] == nullptr) {
+        clt_qp[i] = hrd_get_published_qp(clt_qp_name);
+        if (clt_qp[i] == nullptr) usleep(20000);
       }
-    }
 
-    for (size_t i = 0; i < 1; i++) {
-      for(size_t j = 0;j<conn_config.num_qps;j++){
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", kAppNumClients,srv_gid,j);
-
-        clt_qp[i][j] = nullptr;
-        while (clt_qp[i][j] == nullptr) {
-          clt_qp[i][j] = hrd_get_published_qp(clt_qp_name);
-          if (clt_qp[i][j] == nullptr) usleep(20000);
-        }
-
-        printf("main: Server %zu found client %zu! Connecting..\n", srv_gid,
-              kAppNumClients);
-        int ret = hrd_connect_qp_srm(cb,j, clt_qp[i][j]);
+      if (!conn_config.use_xrc || i % clt_num_threads == 0) {
+        printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
+        size_t local_qp_idx = conn_config.use_xrc ? (i / clt_num_threads) : i;
+        int ret = hrd_connect_qp_srm(cb, static_cast<int>(local_qp_idx), clt_qp[i]);
         if (ret == -1) {
           hrd_ctrl_blk_destroy_srm(cb);
           printf("srm failed creating,删用户态资源\n");
           return;
         }
         hrd_wait_till_ready(clt_qp_name);
+      }
+      printf("服务端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
+             clt_qp[i]->rkey);
+    }
+  } else {
+    // test lat thread
+    for (size_t i = 0; i < 1; i++) {
+      char srv_qp_name[kHrdQPNameSize];
+      sprintf(srv_qp_name, "server-%zu-%zu", srv_gid, kAppNumClients);
+      hrd_publish_conn_qp_srm(cb, i, -1, srv_qp_name);
+    }
 
-        printf("服务端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
-              clt_qp[i][j]->rkey);
-        }
+    for (size_t i = 0; i < 1; i++) {
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", kAppNumClients, srv_gid);
+
+      clt_qp[i] = nullptr;
+      while (clt_qp[i] == nullptr) {
+        clt_qp[i] = hrd_get_published_qp(clt_qp_name);
+        if (clt_qp[i] == nullptr) usleep(20000);
+      }
+
+      printf("main: Server %zu found client %zu! Connecting..\n", srv_gid,
+            kAppNumClients);
+      int ret = hrd_connect_qp_srm(cb, i, clt_qp[i]);
+      if (ret == -1) {
+        hrd_ctrl_blk_destroy_srm(cb);
+        printf("srm failed creating,删用户态资源\n");
+        return;
+      }
+      hrd_wait_till_ready(clt_qp_name);
+
+      printf("服务端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
+            clt_qp[i]->rkey);
     }
   }
 
@@ -1157,14 +1192,9 @@ void run_server_srm(thread_params_t* params) {
 
         tot_sz += real_sz;
 
-        // 根据real_sz选择对应srm qp
-        if (real_sz < KB(10)) {
-          group_idx = 0;
-        } else {
-          //>= 10KB
-          group_idx = 1;
-        }
-        qp_cn = group_idx * NUM_SCHED + sched_idx;
+        group_idx = 0;
+        sched_idx = 0;
+        qp_cn = cn % conn_config.num_qps;
 
         wr.opcode = opcode;
         wr.num_sge = 1;
@@ -1179,15 +1209,15 @@ void run_server_srm(thread_params_t* params) {
 
         size_t remote_offset = 0;
         // size_t remote_offset = rolling_iter;
-        wr.wr.rdma.remote_addr = clt_qp[cn][qp_cn]->buf_addr + remote_offset;
+        wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
         // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-        wr.wr.rdma.rkey = clt_qp[cn][qp_cn]->rkey;
-        wr.qp_type.srm.remote_srqn = clt_qp[cn][qp_cn]->srqn;
+        wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+        wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
         wr.qp_type.srm.remote_gid.global.interface_id =
-            clt_qp[cn][qp_cn]->gid.global.interface_id;
+          clt_qp[cn]->gid.global.interface_id;
         wr.qp_type.srm.remote_gid.global.subnet_prefix =
-            clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
+          clt_qp[cn]->gid.global.subnet_prefix;
         uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
         uint32_t kqp_idx =
             kqp_idx_arr[srv_gid][get_free_qp_idx(srv_gid,NUM_SCHED*group_idx + sched_idx,&ker_qp_seed)];
@@ -1218,11 +1248,6 @@ void run_server_srm(thread_params_t* params) {
         //   ps_ed = rdtsc();
 
 
-        if(group_idx == 0){
-          xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_RELEASE) ;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_RELEASE);
-        }
         
 
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
@@ -1289,18 +1314,6 @@ void run_server_srm(thread_params_t* params) {
         //   }
         // }
 
-        // 对4KB以上的等级，采用原先等级表+数量表的方式
-        __atomic_fetch_add(
-          &wqe_table[srv_gid * (NUM_LEVEL * NUM_SCHED) +
-            group_idx * NUM_SCHED + sched_idx].val,
-          1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
-
-        // // 插入释放屏障：确保c的更新先于b的更新被可见
-        // __atomic_thread_fence(_file);
-
-        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL].val, 1,
-                __ATOMIC_RELEASE);
-
         //文件
         // if(srv_gid == 0){
         //   lat_ed = rdtsc();
@@ -1363,14 +1376,9 @@ void run_server_srm(thread_params_t* params) {
 
       real_sz = KB(1);
 
-        // 根据real_sz选择对应srm qp
-        if (real_sz < KB(10)) {
-          group_idx = 0;
-        } else {
-          //>= 10KB
-          group_idx = 1;
-        }
-        qp_cn = group_idx * NUM_SCHED + sched_idx;
+        group_idx = 0;
+        sched_idx = 0;
+        qp_cn = cn % conn_config.num_qps;
 
         wr.opcode = opcode;
         wr.num_sge = 1;
@@ -1385,15 +1393,15 @@ void run_server_srm(thread_params_t* params) {
 
         size_t remote_offset = 0;
         // size_t remote_offset = rolling_iter;
-        wr.wr.rdma.remote_addr = clt_qp[cn][qp_cn]->buf_addr + remote_offset;
+        wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
         // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-        wr.wr.rdma.rkey = clt_qp[cn][qp_cn]->rkey;
-        wr.qp_type.srm.remote_srqn = clt_qp[cn][qp_cn]->srqn;
+        wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+        wr.qp_type.srm.remote_srqn = clt_qp[cn]->srqn;
         wr.qp_type.srm.remote_gid.global.interface_id =
-            clt_qp[cn][qp_cn]->gid.global.interface_id;
+          clt_qp[cn]->gid.global.interface_id;
         wr.qp_type.srm.remote_gid.global.subnet_prefix =
-            clt_qp[cn][qp_cn]->gid.global.subnet_prefix;
+          clt_qp[cn]->gid.global.subnet_prefix;
 
         uint16_t* tmp = (uint16_t*)&wr.qp_type.srm.remote_gid.raw[14];
         uint32_t kqp_idx = 0;
@@ -1418,11 +1426,6 @@ void run_server_srm(thread_params_t* params) {
 
         int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
         //printf("lat thread post send ret:%d\n",ret);
-        if(group_idx == 0){
-          xrc_tot_bytes[srv_gid][sched_idx][kqp_idx] += real_sz;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].tot_bytes , xrc_tot_bytes[srv_gid][sched_idx][kqp_idx],__ATOMIC_RELEASE) ;
-          __atomic_store_n(&xrc_table[srv_gid][NUM_LEVEL*group_idx + sched_idx][kqp_idx].ctrl,wr.wr_id,__ATOMIC_RELEASE);
-        }
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
         //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
         //    qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid,
@@ -1481,18 +1484,6 @@ void run_server_srm(thread_params_t* params) {
         //     printf("出现哈希表满了的情况\n");
         //   }
         // }
-
-        // 对4KB以上的等级，采用原先等级表+数量表的方式
-        __atomic_fetch_add(
-          &wqe_table[srv_gid * (NUM_LEVEL * NUM_SCHED) +
-            group_idx * NUM_SCHED + sched_idx].val,
-          1, __ATOMIC_RELAXED);  // 使用原子操作存储imm值
-
-        // // 插入释放屏障：确保c的更新先于b的更新被可见
-        // __atomic_thread_fence(__ATOMIC_RELEASE);
-
-        __atomic_fetch_add(&level_table[group_idx + sched_idx * NUM_LEVEL].val, 1,
-                __ATOMIC_RELEASE);
 
         // ed_lat = rdtsc();
         // double e_cycles = (double)(ed_lat - st_lat);
@@ -1718,18 +1709,25 @@ void run_client_srm(thread_params_t* params) {
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
-  conn_config.fst_client_t = (clt_gid % num_threads == 0);
+  conn_config.fst_client_t = true;
   conn_config.kqp_num_per_thread = KQP_NUM_PER_THREAD;
+  conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
+  conn_config.srm_max_app = KERN_MAX_APP;
+  conn_config.srm_num_level = NUM_LEVEL;
+  conn_config.srm_num_sched = NUM_SCHED;
+  conn_config.srm_max_xrc_qp_per_srm = MAX_USER_XRC_QP_PER_SRM;
+  conn_config.srm_xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
+  conn_config.srm_wqe_table_bytes = BRIDGE_WQE_TABLE_SIZE;
+  conn_config.srm_level_table_bytes = BRIDGE_LEVEL_TABLE_SIZE;
+  conn_config.srm_xrc_table_bytes = BRIDGE_XRC_TABLE_SIZE;
+  constexpr size_t srm_qps_per_peer = 1;
   
   if (clt_gid == kAppNumClients) {
     conn_config.rnum_threads = 1;
-    conn_config.num_qps = NUM_LEVEL * NUM_SCHED;
+    conn_config.num_qps = srm_qps_per_peer;
   } else{
     conn_config.rnum_threads = kAppNumServers;
-    if(clt_gid % kAppNumClients == 0)
-      conn_config.num_qps = NUM_LEVEL * NUM_SCHED * kAppNumServers;
-    else 
-      conn_config.num_qps = 0;
+    conn_config.num_qps = srm_qps_per_peer * kAppNumServers;
   }
   
   if(clt_gid != kAppNumClients)
@@ -1759,7 +1757,6 @@ void run_client_srm(thread_params_t* params) {
     shared_cv.wait(lock, []{ return shared_ready; });
   }
 
-  bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
   cb = hrd_ctrl_blk_init_srm(clt_gid, ib_port_index, 0, &conn_config, nullptr,
                              conn_config.is_client, srm_cb, srm_pd);
@@ -1770,63 +1767,54 @@ void run_client_srm(thread_params_t* params) {
 
   if (clt_gid != kAppNumClients) {
     for (size_t i = 0; i < kAppNumServers; i++) {
-      for(size_t j = 0; j < NUM_LEVEL*NUM_SCHED; j++){
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, i,j);
-        int qp_idx = conn_config.fst_client_t ? i*NUM_LEVEL*NUM_SCHED + j : -1;
-        hrd_publish_conn_qp_srm(cb, qp_idx ,i, clt_qp_name);
-      }
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+      int qp_idx = i * srm_qps_per_peer;
+      hrd_publish_conn_qp_srm(cb, qp_idx, i, clt_qp_name);
     }
     for (size_t i = 0; i < kAppNumServers; i++) {
-      for(size_t j = 0; j < NUM_LEVEL*NUM_SCHED; j++){
-        char srv_qp_name[kHrdQPNameSize];
-        sprintf(srv_qp_name, "server-%zu-%zu-%zu", i, clt_gid,j);
+      char srv_qp_name[kHrdQPNameSize];
+      sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
 
-        hrd_qp_attr_t* srv_qp = nullptr;
-        while (srv_qp == nullptr) {
-          srv_qp = hrd_get_published_qp(srv_qp_name);
-          if (srv_qp == nullptr) usleep(20000);
-        }
-        printf("客户端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
-              srv_qp->rkey);
-
-        printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-        if(fst_client_t)
-          hrd_connect_qp_srm(cb, i*NUM_SCHED*NUM_LEVEL+j, srv_qp);
-
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, i, j);
-        hrd_publish_ready(clt_qp_name);
+      hrd_qp_attr_t* srv_qp = nullptr;
+      while (srv_qp == nullptr) {
+        srv_qp = hrd_get_published_qp(srv_qp_name);
+        if (srv_qp == nullptr) usleep(20000);
       }
+      printf("客户端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
+            srv_qp->rkey);
+
+      printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
+      hrd_connect_qp_srm(cb, i * srm_qps_per_peer, srv_qp);
+
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
+      hrd_publish_ready(clt_qp_name);
     }
   } else {
     for (size_t i = 0; i < 1; i++) {
-      for(size_t j = 0; j < NUM_LEVEL*NUM_SCHED; j++){
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, kAppNumServers,j);
-        hrd_publish_conn_qp_srm(cb,j,0, clt_qp_name);
-      }
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, kAppNumServers);
+      hrd_publish_conn_qp_srm(cb, i, 0, clt_qp_name);
     }
     for (size_t i = 0; i < 1; i++) {
-      for(size_t j = 0; j < NUM_LEVEL*NUM_SCHED; j++){
-        char srv_qp_name[kHrdQPNameSize];
-        sprintf(srv_qp_name, "server-%zu-%zu-%zu", kAppNumServers, clt_gid,j);
+      char srv_qp_name[kHrdQPNameSize];
+      sprintf(srv_qp_name, "server-%zu-%zu", kAppNumServers, clt_gid);
 
-        hrd_qp_attr_t* srv_qp = nullptr;
-        while (srv_qp == nullptr) {
-          srv_qp = hrd_get_published_qp(srv_qp_name);
-          if (srv_qp == nullptr) usleep(20000);
-        }
-        printf("客户端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
-              srv_qp->rkey);
-
-        printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
-        hrd_connect_qp_srm(cb, i*NUM_SCHED*NUM_LEVEL+j, srv_qp);
-
-        char clt_qp_name[kHrdQPNameSize];
-        sprintf(clt_qp_name, "client-%zu-%zu-%zu", clt_gid, kAppNumServers,j);
-        hrd_publish_ready(clt_qp_name);
+      hrd_qp_attr_t* srv_qp = nullptr;
+      while (srv_qp == nullptr) {
+        srv_qp = hrd_get_published_qp(srv_qp_name);
+        if (srv_qp == nullptr) usleep(20000);
       }
+      printf("客户端lkey：%d，收到的rkey：%d\n", cb->conn_buf_mr->lkey,
+            srv_qp->rkey);
+
+      printf("main: Client %zu found server %zu! Connecting..\n", clt_gid, i);
+      hrd_connect_qp_srm(cb, i * srm_qps_per_peer, srv_qp);
+
+      char clt_qp_name[kHrdQPNameSize];
+      sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, kAppNumServers);
+      hrd_publish_ready(clt_qp_name);
     }
   }
 
@@ -1906,7 +1894,6 @@ int main(int argc, char* argv[]) {
     smartshim::start_tuner();
   
   }
-  int fd, ret;
   if(!FLAGS_is_client){
     // 初始化wqe表
     // std::ifstream infile("AliStorage2019_traffic_size.txt");
@@ -1918,88 +1905,8 @@ int main(int argc, char* argv[]) {
     printf("traffic_size size:%d\n,traffic_size[0]:%d\n", traffic_size.size(),
           traffic_size[0]);
 
-    if(FLAGS_use_srm){
-      // mmap表
-      
-      struct app_table_alloc_req req;
-      void* wqe_map;
-      void* level_map;
-      void* xrc_map;
-
-      fd = open(DEV_PATH, O_RDWR);
-      if (fd < 0) {
-        perror("打开设备失败");
-        return -1;
-      }
-
-      wqe_map = mmap(NULL, BRIDGE_WQE_TABLE_SIZE, PROT_READ | PROT_WRITE,
-                     MAP_SHARED, fd, BRIDGE_MMAP_WQE_OFFSET);
-      if (wqe_map == MAP_FAILED) {
-        perror("wqe共享表mmap失败");
-        close(fd);
-        return -1;
-      }
-
-      level_map = mmap(NULL, BRIDGE_LEVEL_TABLE_SIZE, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, fd, BRIDGE_MMAP_LEVEL_OFFSET);
-      if (level_map == MAP_FAILED) {
-        perror("level共享表mmap失败");
-        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
-        close(fd);
-        return -1;
-      }
-
-      xrc_map = mmap(NULL, BRIDGE_XRC_TABLE_SIZE, PROT_READ | PROT_WRITE,
-                     MAP_SHARED, fd, BRIDGE_MMAP_XRC_OFFSET);
-      if (xrc_map == MAP_FAILED) {
-        perror("xrc共享表mmap失败");
-        munmap(level_map, BRIDGE_LEVEL_TABLE_SIZE);
-        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
-        close(fd);
-        return -1;
-      }
-
-      memset(&req, 0, sizeof(req));
-      req.app_id = SRM_AUTO_APP_ID;
-      req.app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
-      req.xrc_qp_num_per_srm = KQP_NUM_PER_THREAD;
-
-      ret = ioctl(fd, ALLOC_APP_TABLE, &req);
-      if (ret < 0) {
-        perror("ALLOC_APP_TABLE失败");
-        munmap(xrc_map, BRIDGE_XRC_TABLE_SIZE);
-        munmap(level_map, BRIDGE_LEVEL_TABLE_SIZE);
-        munmap(wqe_map, BRIDGE_WQE_TABLE_SIZE);
-        close(fd);
-        return -1;
-      }
-
-      wqe_table = (aligned_u32*)((uint8_t*)wqe_map + req.wqe_table_offset);
-      level_table = (aligned_u32*)((uint8_t*)level_map + req.level_table_offset);
-      xrc_table = (xrc_table_entry (*)[NUM_LEVEL*NUM_SCHED][KQP_NUM_PER_THREAD])
-                  ((uint8_t*)xrc_map + req.xrc_table_offset);
-
-      for (int i = 0; i < TABLE_SIZE / sizeof(aligned_u32); i++) {
-        wqe_table[i].val = 0;
-      }
-      for (int i = 0; i < LEVEL_TABLE_SIZE / sizeof(aligned_u32); i++) {
-        level_table[i].val = 0;
-      }
-
-      for(int i= 0;i<(kAppNumServers + FLAGS_test_lat_thread);i++){
-        for(int j=0;j<NUM_LEVEL*NUM_SCHED;j++){
-          for(int k=0;k<KQP_NUM_PER_THREAD;k++){
-            xrc_table[i][j][k].ctrl = 0;
-            xrc_table[i][j][k].tot_bytes = 0;
-          }
-        }
-      }
-
-
-      // 初始化kqp_idx_arr表
+    if (FLAGS_use_srm) {
       memset(kqp_idx_arr, -1, sizeof(kqp_idx_arr));
-
-
     }
     // 初始化随机数种子数组
     generate_random_seeds(seed_array, kAppNumServers + 1);
@@ -2085,10 +1992,6 @@ int main(int argc, char* argv[]) {
   }
   
 
-  if(!FLAGS_is_client && FLAGS_use_srm){
-    // 关闭内核设备
-    close(fd);
-  }
   // //文件
   // fclose(log_file);
   return 0;

@@ -106,6 +106,16 @@ struct hrd_conn_config_t {
 
   int kqp_num_per_thread;
 
+  uint32_t srm_app_threads = 0;
+  uint32_t srm_max_app = 0;
+  uint32_t srm_num_level = 0;
+  uint32_t srm_num_sched = 0;
+  uint32_t srm_max_xrc_qp_per_srm = 0;
+  uint32_t srm_xrc_qp_num_per_srm = 0;
+  uint64_t srm_wqe_table_bytes = 0;
+  uint64_t srm_level_table_bytes = 0;
+  uint64_t srm_xrc_table_bytes = 0;
+
 
   // Optional params with their default values
   size_t sq_depth = kHrdSQDepth;

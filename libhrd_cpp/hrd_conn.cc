@@ -1005,19 +1005,31 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     struct ibv_qp_init_attr_ex create_attr;
     memset(&create_attr, 0, sizeof(struct ibv_qp_init_attr_ex));
 
-    create_attr.qp_type = IBV_QPT_SRM;
+    create_attr.qp_type = IBV_QPT_RC;
     create_attr.comp_mask = IBV_QP_INIT_ATTR_PD;
     create_attr.pd = cb->pd;
     create_attr.send_cq = cb->conn_cq[0];
+    create_attr.recv_cq = cb->conn_cq[0];
     create_attr.cap.max_send_wr = cb->conn_config.sq_depth;
+    create_attr.cap.max_recv_wr = 1;
     create_attr.cap.max_send_sge = 1;
+    create_attr.cap.max_recv_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
 
     if(cb->conn_config.is_client){
       create_attr.xrcd = cb->xrcd;
     }
     create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
-    create_attr.rnode_num = cb->conn_config.kqp_num_per_thread;
+    create_attr.rnode_num = cb->conn_config.num_qps;
+    create_attr.srm_app_threads = cb->conn_config.srm_app_threads;
+    create_attr.srm_max_app = cb->conn_config.srm_max_app;
+    create_attr.srm_num_level = cb->conn_config.srm_num_level;
+    create_attr.srm_num_sched = cb->conn_config.srm_num_sched;
+    create_attr.srm_max_xrc_qp_per_srm = cb->conn_config.srm_max_xrc_qp_per_srm;
+    create_attr.srm_xrc_qp_num_per_srm = cb->conn_config.srm_xrc_qp_num_per_srm;
+    create_attr.srm_wqe_table_bytes = cb->conn_config.srm_wqe_table_bytes;
+    create_attr.srm_level_table_bytes = cb->conn_config.srm_level_table_bytes;
+    create_attr.srm_xrc_table_bytes = cb->conn_config.srm_xrc_table_bytes;
     
     
 
@@ -1213,6 +1225,21 @@ void hrd_connect_qp(hrd_ctrl_blk_t* cb, size_t n,
 
 int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
                     hrd_qp_attr_t* remote_qp_attr) {
+  if (cb == nullptr || remote_qp_attr == nullptr) {
+    fprintf(stderr, "HRD: hrd_connect_qp_srm got null input\n");
+    return -1;
+  }
+  if (i < 0 || static_cast<size_t>(i) >= cb->conn_config.num_qps) {
+    fprintf(stderr,
+            "HRD: hrd_connect_qp_srm index out of range: i=%d num_qps=%zu\n",
+            i, cb->conn_config.num_qps);
+    return -1;
+  }
+  if (cb->conn_qp == nullptr || cb->conn_qp[i] == nullptr) {
+    fprintf(stderr, "HRD: hrd_connect_qp_srm local QP is null for i=%d\n", i);
+    return -1;
+  }
+
   struct ibv_qp_attr conn_attr;
   memset(&conn_attr, 0, sizeof(struct ibv_qp_attr));
   conn_attr.qp_state = IBV_QPS_RTR;
@@ -1245,8 +1272,10 @@ int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
   }
 
   if (ibv_modify_qp(cb->conn_qp[i], &conn_attr, rtr_flags)) {
-    fprintf(stderr, "HRD: Failed to modify QP to RTR: %s\n", strerror(errno));
-    assert(false);
+    fprintf(stderr,
+            "HRD: Failed to modify QP to RTR: %s (local_qpn=%u remote_qpn=%u i=%d)\n",
+            strerror(errno), cb->conn_qp[i]->qp_num, remote_qp_attr->qpn, i);
+    return -1;
   }
 
   memset(&conn_attr, 0, sizeof(conn_attr));
@@ -1266,8 +1295,10 @@ int hrd_connect_qp_srm(hrd_ctrl_blk_t* cb, int i,
   }
 
   if (ibv_modify_qp(cb->conn_qp[i], &conn_attr, rts_flags)) {
-    fprintf(stderr, "HRD: Failed to modify QP to RTS: %s\n", strerror(errno));
-    assert(false);
+    fprintf(stderr,
+            "HRD: Failed to modify QP to RTS: %s (local_qpn=%u remote_qpn=%u i=%d)\n",
+            strerror(errno), cb->conn_qp[i]->qp_num, remote_qp_attr->qpn, i);
+    return -1;
   }
   return 0;
 }
