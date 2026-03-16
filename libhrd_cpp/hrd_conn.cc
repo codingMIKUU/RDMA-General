@@ -437,7 +437,6 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
   }
   cb->conn_cq = new ibv_cq*[1];
   
-  cb->srq = new ibv_srq*[cb->conn_config.num_srqs];
 
   hrd_create_conn_qps_srm(cb);
   // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
@@ -598,10 +597,7 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
   hrd_red_printf("HRD_SRM: Destroying control block %d\n", cb->local_hid);
 
 
-  if(cb->conn_config.is_client){
-    for(int i=0;i<cb->conn_config.num_srqs;i++)
-      rt_assert(ibv_destroy_srq(cb->srq[i])==0,"Failed to destroy srq");
-  }
+
 
   for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
 
@@ -979,26 +975,26 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
               "Failed to create conn CQ. Check hugepages and SHM limits?");
 
 
-  if(cb->conn_config.is_client){
+  // if(cb->conn_config.is_client){
 
-    //Create srq
-    ibv_srq_init_attr_ex srq_init_attr;
-    memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
-    srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ |
-                              IBV_SRQ_INIT_ATTR_PD;
-    srq_init_attr.srq_type = IBV_SRQT_XRC;
-    srq_init_attr.xrcd = cb->xrcd;
-    srq_init_attr.pd = cb->pd;
-    srq_init_attr.attr.max_sge = 1;
-    srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-    srq_init_attr.cq = cb->conn_cq[0];
-    for(size_t i = 0;i<cb->conn_config.num_srqs;i++){
+  //   //Create srq
+  //   ibv_srq_init_attr_ex srq_init_attr;
+  //   memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
+  //   srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ |
+  //                             IBV_SRQ_INIT_ATTR_PD;
+  //   srq_init_attr.srq_type = IBV_SRQT_XRC;
+  //   srq_init_attr.xrcd = cb->xrcd;
+  //   srq_init_attr.pd = cb->pd;
+  //   srq_init_attr.attr.max_sge = 1;
+  //   srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
+  //   srq_init_attr.cq = cb->conn_cq[0];
+  //   for(size_t i = 0;i<cb->conn_config.num_srqs;i++){
       
-      cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
-      rt_assert(cb->srq != nullptr,"Failed to Create srq");
-    }
+  //     cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
+  //     rt_assert(cb->srq != nullptr,"Failed to Create srq");
+  //   }
   
-  }
+  // }
 
 #if (kHrdMlx5Atomics == false)
   for(int i = 0;i<cb->conn_config.num_qps;i++){
@@ -1022,14 +1018,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
     create_attr.rnode_num = cb->conn_config.num_qps;
     create_attr.srm_app_threads = cb->conn_config.srm_app_threads;
-    create_attr.srm_max_app = cb->conn_config.srm_max_app;
-    create_attr.srm_num_level = cb->conn_config.srm_num_level;
-    create_attr.srm_num_sched = cb->conn_config.srm_num_sched;
-    create_attr.srm_max_xrc_qp_per_srm = cb->conn_config.srm_max_xrc_qp_per_srm;
     create_attr.srm_xrc_qp_num_per_srm = cb->conn_config.srm_xrc_qp_num_per_srm;
-    create_attr.srm_wqe_table_bytes = cb->conn_config.srm_wqe_table_bytes;
-    create_attr.srm_level_table_bytes = cb->conn_config.srm_level_table_bytes;
-    create_attr.srm_xrc_table_bytes = cb->conn_config.srm_xrc_table_bytes;
     
     
 
@@ -1319,10 +1308,6 @@ void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb,int qp_idx, int srq_idx, const c
   qp_attr.buf_addr = reinterpret_cast<uint64_t>(cb->conn_buf);
   qp_attr.buf_size = cb->conn_config.buf_size;
   qp_attr.rkey = cb->conn_buf_mr->rkey;
-  if(cb->conn_config.is_client && srq_idx>=0){
-    int ret = ibv_get_srq_num(cb->srq[srq_idx],&(qp_attr.srqn));
-    rt_assert(ret==0,"Failed to get srqn.");
-  }
   hrd_publish(qp_attr.name, &qp_attr, sizeof(hrd_qp_attr_t));
 }
 void hrd_publish_conn_qp(hrd_ctrl_blk_t* cb, size_t n, const char* qp_name) {
