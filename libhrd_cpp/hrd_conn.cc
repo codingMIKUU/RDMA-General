@@ -82,7 +82,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
     // Resolve the port into cb->resolve
     hrd_resolve_port_index(cb, port_index);
     cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
-    printf("error\n");
+    printf("use default pd and cb\n");
   }
 
   

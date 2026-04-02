@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 2;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 512;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -345,7 +345,7 @@ void run_server(thread_params_t* params) {
   // struct ibv_wc wc_lat;
   struct ibv_wc wc[kAppUnsigBatch];
   size_t rolling_iter = 0;             // For performance measurement
-  size_t nb_tx[kAppNumClients] = {0};  // Per-QP signaling
+  size_t nb_tx[kAppNumClients+1] = {0};  // Per-QP signaling
   size_t nb_tx_tot = 0;                // For windowing (for READs only)
   struct timespec run_start, run_end;
   struct timespec msr_start, msr_end;
@@ -504,6 +504,14 @@ void run_server(thread_params_t* params) {
           else if (got > 0) {
             // 允许的发送阈值前移 got：下一次最多再发 got 个
             nxt_poll_num[qp_cn] += (size_t)got;
+
+            // if(srv_gid == 0){
+            //   uint64_t ed_lat = rdtsc();
+            //   fprintf(log_file,"吞吐线程post_send cycles:%llu, poll completions cycles:%llu\n,", lat_ed - lat_st,ed_lat - lat_ed);
+            //   fflush(log_file);
+            // }
+
+
             break;  // 已获得预算，退出等待，继续 post send
           }
         }
@@ -537,6 +545,7 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+    //  real_sz = MB(1);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -578,8 +587,13 @@ void run_server(thread_params_t* params) {
       }
 
       bw_limiter.wait(sgl.length);
+
+      if(srv_gid == 0)
+        lat_st = rdtsc();
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
 
+      if(srv_gid == 0)
+        lat_ed = rdtsc();
       // //文件
       // if(srv_gid == 0){
       //   lat_ed = rdtsc();
@@ -616,7 +630,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(8)) {
+      if (rolling_iter >= MB(1)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -669,9 +683,17 @@ void run_server(thread_params_t* params) {
       // wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
       nb_tx[qp_cn]++;
 
+      uint64_t st_lat,ed_lat;
+
       lat_st = rdtsc();
 
+      st_lat = lat_st;
+
       int ret = ibv_post_send(cb->conn_qp[qp_cn], &wr, &bad_send_wr);
+
+      //ed_lat = rdtsc();
+
+
 
       rt_assert(ret == 0);
       rolling_iter++;
@@ -687,6 +709,9 @@ void run_server(thread_params_t* params) {
         elapsed_time_us = (elapsed_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
         lats.push_back(elapsed_time_us);
       }
+
+      // fprintf(log_file,"时延线程post_send cycles:%llu, poll completions cycles:%llu\n,", ed_lat - st_lat,lat_ed - ed_lat);
+      // fflush(log_file);
     }
   }
 }
@@ -710,8 +735,15 @@ void run_server_srm(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
-  conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
-  conn_config.srm_xrc_qp_num_per_srm = kAppNumClients;
+  // if(srv_gid == kAppNumServers && FLAGS_test_lat_thread){
+  //   conn_config.srm_app_threads = 1;
+  //   conn_config.srm_xrc_qp_num_per_srm = 32;
+  // }
+  // else{
+    conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
+    conn_config.srm_xrc_qp_num_per_srm = kAppNumClients;
+  // }
+
   hrd_ctrl_blk_t* cb;
 
   {
@@ -890,6 +922,9 @@ void run_server_srm(thread_params_t* params) {
 
   int nxt_post_wqe_nums = srv_gid == kAppNumServers ? kAppLatBatch: kAppUnsigBatch;
   int lat_st_head = 0,lat_st_tail = 0;
+
+  uint64_t st_lat,ed_lat;
+  struct srm_qp_entry *entry;
   while (1) {
     if (srv_gid != kAppNumServers) {
       if (rolling_iter >= MB(1)) {
@@ -966,9 +1001,16 @@ void run_server_srm(thread_params_t* params) {
             printf("poll cq error status:%d\n",wc[0].status);
             rt_assert(false);
           }
+
+          // //文件
+          // if(srv_gid == 0){
+          //   ed_lat = rdtsc();
+            
+          //   fprintf(log_file,"吞吐线程post_send cycles:%llu doorbell cycles:%llu, poll completions cycles:%llu\n,",lat_ed - lat_st,entry->cycles-lat_ed,ed_lat - entry->cycles);
+          //   fflush(log_file);
+          // }
         }
         ibv_srm_add_tot_recv_cqes(cb->conn_qp[0],
-                static_cast<uint32_t>(srv_gid),
                 static_cast<uint64_t>(ret));
         // if(ret>0)
         //   printf("poll completions:%d\n",ret);
@@ -1051,11 +1093,13 @@ void run_server_srm(thread_params_t* params) {
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        // real_sz = MB(1);
         if(real_sz < KB(10))
           group_idx = 0;
         else 
           group_idx = 1;
-        cn = (hrd_fastrand(&ker_qp_seed) % remote_peer_count) + remote_peer_count*(group_idx*NUM_SCHED + sched_idx);
+        //cn = (hrd_fastrand(&ker_qp_seed) % remote_peer_count) + remote_peer_count*(group_idx*NUM_SCHED + sched_idx);
+        cn = hrd_fastrand(&ker_qp_seed) % remote_peer_count * NUM_LEVEL * NUM_SCHED + group_idx*NUM_SCHED + sched_idx;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
 
@@ -1104,8 +1148,15 @@ void run_server_srm(thread_params_t* params) {
         // if(srv_gid == 0)
         //   lat_st = rdtsc();
 
-        
+        if(srv_gid == 0){
+          lat_st = rdtsc();
+        }
         int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
+
+        if(srv_gid == 0){
+          lat_ed = rdtsc();
+          entry = (struct srm_qp_entry*)wr.wr_id;
+        }
 
         // //文件
         // uint64_t ps_ed ;
@@ -1207,7 +1258,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(100)) {//srm时延
+      if (rolling_iter >= MB(1)) {//srm时延
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1243,7 +1294,8 @@ void run_server_srm(thread_params_t* params) {
           group_idx = 0;
         else 
           group_idx = 1;
-        cn = (hrd_fastrand(&ker_qp_seed) % remote_peer_count) + remote_peer_count*(group_idx*NUM_SCHED + sched_idx);
+        //cn = (hrd_fastrand(&ker_qp_seed) % remote_peer_count) + remote_peer_count*(group_idx*NUM_SCHED + sched_idx);
+        cn = hrd_fastrand(&ker_qp_seed) % remote_peer_count * NUM_LEVEL * NUM_SCHED + group_idx*NUM_SCHED + sched_idx;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
 
@@ -1286,12 +1338,14 @@ void run_server_srm(thread_params_t* params) {
 
         // printf("ready to post send, rolling_iter%d\n",rolling_iter);
 
-        // uint64_t st_lat,ed_lat;
-        // st_lat = rdtsc();
+        
+        
         if(post_wqe_i == 0)
           lat_st = rdtsc();
 
+        //st_lat = lat_st;
         int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
+        entry = (struct srm_qp_entry*)wr.wr_id;
         //printf("lat thread post send ret:%d\n",ret);
         // wqe_table[qp_cn*(kAppNumServers+FLAGS_test_lat_thread) + srv_gid]++;
         //  printf("当前线程:%d,wqe_table[%d] = %d\n",srv_gid,
@@ -1352,7 +1406,8 @@ void run_server_srm(thread_params_t* params) {
         //   }
         // }
 
-        // ed_lat = rdtsc();
+        //ed_lat = rdtsc();
+        
         // double e_cycles = (double)(ed_lat - st_lat);
         // double e_t_us = (e_cycles / CPU_FREQUENCY_HZ) * 1000000.0;
         // printf("post send cost %.2f us\n",e_t_us);
@@ -1377,7 +1432,6 @@ void run_server_srm(thread_params_t* params) {
       }
 
       ibv_srm_add_tot_recv_cqes(cb->conn_qp[0],
-                static_cast<uint32_t>(srv_gid),
                 static_cast<uint64_t>(kAppLatBatch));
 
       
@@ -1388,7 +1442,7 @@ void run_server_srm(thread_params_t* params) {
       for(int i = 0;i<kAppLatBatch;i++){
         lats.push_back(avg_time_us);
       }
-      
+
       // if(ret>0)
       //   printf("poll completions:%d\n",ret);
       
@@ -1790,9 +1844,9 @@ int main(int argc, char* argv[]) {
       }
     }
   }
-  //文件
+  // //文件MB
   // char filename[64] ;
-  // sprintf(filename, "log_FCScale.txt");
+  // sprintf(filename, "log_FC_1_32.txt");
   // log_file = fopen(filename, "w");
   // if(log_file == NULL){
   //   perror("fopen失败");
