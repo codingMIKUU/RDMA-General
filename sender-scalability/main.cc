@@ -40,10 +40,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 512;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 0;
+static constexpr size_t kAppNumClients = 0;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 64;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -255,6 +255,7 @@ void run_server(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
+  conn_config.isSmall = (srv_gid == kAppNumServers && FLAGS_test_lat_thread) ? 1 : 0;
   // if(FLAGS_use_xrc)
   //   conn_config.sq_depth = kHrdSQDepth*10;
 
@@ -452,8 +453,8 @@ void run_server(thread_params_t* params) {
       }
 
       // Choose the next client to send a packet to
-      size_t cn = (hrd_fastrand(&seed)) % kAppNumClients;
-      // cn = (cn + 1) % kAppNumClients;
+      size_t //cn = (hrd_fastrand(&seed)) % kAppNumClients;
+      cn = (cn + 1) % kAppNumClients;
       qp_cn = cb->conn_config.use_xrc ? cn / clt_num_threads : cn;
       wr.opcode = opcode;
       wr.num_sge = 1;
@@ -544,8 +545,8 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-    //  real_sz = MB(1);
+      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = MB(1);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -630,7 +631,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(256)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -735,14 +736,14 @@ void run_server_srm(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
-  // if(srv_gid == kAppNumServers && FLAGS_test_lat_thread){
-  //   conn_config.srm_app_threads = 1;
-  //   conn_config.srm_xrc_qp_num_per_srm = 32;
-  // }
-  // else{
+  if(srv_gid == kAppNumServers && FLAGS_test_lat_thread){
+    conn_config.srm_app_threads = 1;
+    conn_config.srm_xrc_qp_num_per_srm = 4;
+  }
+  else{
     conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
     conn_config.srm_xrc_qp_num_per_srm = kAppNumClients;
-  // }
+  }
 
   hrd_ctrl_blk_t* cb;
 
@@ -1092,8 +1093,8 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        // real_sz = MB(1);
+        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        real_sz = MB(1);
         if(real_sz < KB(10))
           group_idx = 0;
         else 
@@ -1107,6 +1108,7 @@ void run_server_srm(thread_params_t* params) {
         // else real_sz = 304;
 
 
+        
         tot_sz += real_sz;
 
         group_idx = 0;
@@ -1258,7 +1260,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= MB(1)) {//srm时延
+      if (rolling_iter >= KB(256)) {//srm时延
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1431,8 +1433,8 @@ void run_server_srm(thread_params_t* params) {
         return;
       }
 
-      ibv_srm_add_tot_recv_cqes(cb->conn_qp[0],
-                static_cast<uint64_t>(kAppLatBatch));
+      // ibv_srm_add_tot_recv_cqes(cb->conn_qp[0],
+      //           static_cast<uint64_t>(kAppLatBatch));
 
       
       lat_ed = rdtsc();

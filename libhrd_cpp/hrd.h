@@ -98,6 +98,7 @@ struct hrd_conn_config_t {
   bool use_xrc;
   bool is_client;
   bool fst_client_t;
+  bool isSmall;
   volatile uint8_t* prealloc_buf;
   size_t buf_size;
   int buf_shm_key;
