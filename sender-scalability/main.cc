@@ -40,10 +40,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 0;
-static constexpr size_t kAppNumClients = 0;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumClients = 32;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 64;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 32;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -736,14 +736,14 @@ void run_server_srm(thread_params_t* params) {
   conn_config.use_xrc = (FLAGS_use_xrc == 1);
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
-  if(srv_gid == kAppNumServers && FLAGS_test_lat_thread){
-    conn_config.srm_app_threads = 1;
-    conn_config.srm_xrc_qp_num_per_srm = 4;
-  }
-  else{
-    conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
-    conn_config.srm_xrc_qp_num_per_srm = kAppNumClients;
-  }
+  // if(srv_gid == kAppNumServers && FLAGS_test_lat_thread){
+  //   conn_config.srm_app_threads = 1;
+  //   conn_config.srm_xrc_qp_num_per_srm = 4;
+  // }
+  // else{
+  conn_config.srm_app_threads = (uint32_t)(kAppNumServers + FLAGS_test_lat_thread);
+  conn_config.srm_xrc_qp_num_per_srm = kAppNumClients;
+  //}
 
   hrd_ctrl_blk_t* cb;
 
