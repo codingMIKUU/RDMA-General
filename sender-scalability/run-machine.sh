@@ -33,8 +33,8 @@ flags="\
 	--machine_id $1 \
   --use_xrc 0 \
   --test_lat 0 \ 
-  --use_srm 1 \
-  --test_lat_thread 0
+  --use_srm 0 \
+  --test_lat_thread 1
 "
 
 # Check for non-gdb mode

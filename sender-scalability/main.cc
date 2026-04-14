@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 32;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 32;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -376,7 +376,7 @@ void run_server(thread_params_t* params) {
 
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(512)) {
+      if (rolling_iter >= MB(2)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -453,8 +453,8 @@ void run_server(thread_params_t* params) {
       }
 
       // Choose the next client to send a packet to
-      size_t //cn = (hrd_fastrand(&seed)) % kAppNumClients;
-      cn = (cn + 1) % kAppNumClients;
+      size_t cn = (hrd_fastrand(&seed)) % kAppNumClients;
+      //cn = (cn + 1) % kAppNumClients;
       qp_cn = cb->conn_config.use_xrc ? cn / clt_num_threads : cn;
       wr.opcode = opcode;
       wr.num_sge = 1;
@@ -546,7 +546,7 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = MB(1);
+      real_sz = 64;
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -631,7 +631,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(256)) {
+      if (rolling_iter >= KB(16)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -1094,7 +1094,7 @@ void run_server_srm(thread_params_t* params) {
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = MB(1);
+        real_sz = 64;
         if(real_sz < KB(10))
           group_idx = 0;
         else 
@@ -1260,7 +1260,7 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums = 0;
     } else {
       // test lat thread
-      if (rolling_iter >= KB(256)) {//srm时延
+      if (rolling_iter >= KB(64)) {//srm时延
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
