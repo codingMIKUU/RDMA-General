@@ -23,7 +23,7 @@ flags="
   --use_uc 0 \
 	--is_client 0 \
 	--size 8192 \
-	--run_time 1000 \
+	--run_time 10000 \
 	--do_read 0 \
 	--use_xrc 0 \
 	--test_lat 0 \

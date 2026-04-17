@@ -22,9 +22,9 @@
 #include <thread>
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
-static constexpr size_t kHrdMaxInline = 128;
+static constexpr size_t kHrdMaxInline = 1;
 static constexpr size_t kHrdSQDepth = 128;   ///< Depth of all SEND queues,512.SRM模式时为4096
-static constexpr size_t kHrdRQDepth = 128;  ///< Depth of all RECV queues
+static constexpr size_t kHrdRQDepth = 1;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
 static constexpr uint32_t kHrdInvalidNUMANode = 16;

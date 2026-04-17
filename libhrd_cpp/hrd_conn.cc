@@ -969,7 +969,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
   //assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
 
-  cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
+  cb->conn_cq[0] = ibv_create_cq(cb->resolve.ib_ctx, 8192,
                                    nullptr, nullptr, 0);
     // We sometimes set Mellanox env variables for hugepage-backed queues.
     rt_assert(cb->conn_cq[0] != nullptr,

@@ -97,6 +97,8 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
         throw std::runtime_error(xmsg.str());
       }
 
+      printf("opened port: %s port %u\n", ib_ctx->device->name, port_i);
+
       if (port_attr.phys_state != IBV_PORT_ACTIVE &&
           port_attr.phys_state != IBV_PORT_ACTIVE_DEFER) {
         continue;

@@ -41,7 +41,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 1024;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 4096;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
@@ -237,7 +237,7 @@ void print_qp_info(struct hrd_qp_attr_t* info) {
 std::vector<uint64_t>cpu_cycles,ps_cycles;
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
-  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  size_t ib_port_index = 0;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   int clt_num_threads = kAppNumClients / kAppNumClientMachines;  // for xrc only
 
@@ -545,8 +545,8 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = 64;
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      // real_sz = 512;
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -631,7 +631,7 @@ void run_server(thread_params_t* params) {
         lats.push_back(lat_sec);
       }
     } else {
-      if (rolling_iter >= KB(16)) {
+      if (rolling_iter >= KB(256)) {
         double avg =
             std::accumulate(lats.begin(), lats.end(), 0.0) / lats.size();
         sort(lats.begin(), lats.end());
@@ -720,7 +720,7 @@ void run_server(thread_params_t* params) {
 
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
-  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  size_t ib_port_index = 0;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   constexpr size_t srm_qps_per_peer = NUM_LEVEL * NUM_SCHED;
   size_t remote_peer_count = (srv_gid == kAppNumServers && FLAGS_test_lat_thread)
@@ -769,7 +769,7 @@ void run_server_srm(thread_params_t* params) {
   //   shared_cv.wait(lock, []{ return shared_ready; });
   // }
 
-  cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+  cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 0 , &conn_config, nullptr,
                              conn_config.is_client, srm_cb, srm_pd);
   //cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 1 so that we can detect WRITE completion in client.
@@ -928,7 +928,7 @@ void run_server_srm(thread_params_t* params) {
   struct srm_qp_entry *entry;
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= MB(1)) {
+      if (rolling_iter >= KB(1024)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -1020,7 +1020,7 @@ void run_server_srm(thread_params_t* params) {
 
 
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        if (rolling_iter >= MB(1)) {
+        if (rolling_iter >= KB(1024)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -1093,13 +1093,14 @@ void run_server_srm(thread_params_t* params) {
 
         sched_idx = hrd_fastrand(&sched_seed) % NUM_SCHED;  // 内核调度器下标 
 
-        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = 64;
+        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        //real_sz = 64;
         if(real_sz < KB(10))
           group_idx = 0;
         else 
           group_idx = 1;
         //cn = (hrd_fastrand(&ker_qp_seed) % remote_peer_count) + remote_peer_count*(group_idx*NUM_SCHED + sched_idx);
+        //printf("group_id:%d,cn:%zu\n",group_idx,cn);
         cn = hrd_fastrand(&ker_qp_seed) % remote_peer_count * NUM_LEVEL * NUM_SCHED + group_idx*NUM_SCHED + sched_idx;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
@@ -1502,7 +1503,7 @@ void run_client(thread_params_t* params) {
   if (clt_gid == 0) {
     srm_cb = new hrd_ctrl_blk_t();
     memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb, 0);
+    hrd_resolve_port_index(srm_cb, ib_port_index);
     srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
     {
         std::unique_lock<std::mutex> lock(shared_mutex);
@@ -1661,7 +1662,7 @@ void run_client_srm(thread_params_t* params) {
   if (clt_gid == 0) {
     srm_cb = new hrd_ctrl_blk_t();
     memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb, 0);
+    hrd_resolve_port_index(srm_cb, ib_port_index);
     srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
     {
         std::unique_lock<std::mutex> lock(shared_mutex);
@@ -1821,8 +1822,8 @@ int main(int argc, char* argv[]) {
   }
   if(!FLAGS_is_client){
     // 初始化wqe表
-    // std::ifstream infile("AliStorage2019_traffic_size.txt");
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
+    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);
