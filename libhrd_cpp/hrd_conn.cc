@@ -436,7 +436,8 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
    
   }
   cb->conn_cq = new ibv_cq*[1];
-  
+  if (cb->conn_config.is_client && cb->conn_config.num_srqs > 0)
+    cb->srq = new ibv_srq*[cb->conn_config.num_srqs];
 
   hrd_create_conn_qps_srm(cb);
   // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
@@ -603,6 +604,11 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
 
     rt_assert(ibv_destroy_qp(cb->conn_qp[i]) == 0,
               "Failed to destroy connected QP");
+  }
+
+  if (cb->conn_config.is_client && cb->srq != nullptr) {
+    for (size_t i = 0; i < cb->conn_config.num_srqs; i++)
+      rt_assert(ibv_destroy_srq(cb->srq[i]) == 0, "Failed to destroy XRC SRQ");
   }
 
   rt_assert(ibv_destroy_cq(cb->conn_cq[0]) == 0,
@@ -976,26 +982,23 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
               "Failed to create conn CQ. Check hugepages and SHM limits?");
 
 
-  // if(cb->conn_config.is_client){
+  if (cb->conn_config.is_client && cb->conn_config.num_srqs > 0) {
+    ibv_srq_init_attr_ex srq_init_attr;
+    memset(&srq_init_attr, 0, sizeof(ibv_srq_init_attr_ex));
+    srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD |
+                              IBV_SRQ_INIT_ATTR_CQ | IBV_SRQ_INIT_ATTR_PD;
+    srq_init_attr.srq_type = IBV_SRQT_XRC;
+    srq_init_attr.xrcd = cb->xrcd;
+    srq_init_attr.pd = cb->pd;
+    srq_init_attr.cq = cb->conn_cq[0];
+    srq_init_attr.attr.max_sge = 1;
+    srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
 
-  //   //Create srq
-  //   ibv_srq_init_attr_ex srq_init_attr;
-  //   memset(&srq_init_attr,0,sizeof(ibv_srq_init_attr_ex));
-  //   srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD | IBV_SRQ_INIT_ATTR_CQ |
-  //                             IBV_SRQ_INIT_ATTR_PD;
-  //   srq_init_attr.srq_type = IBV_SRQT_XRC;
-  //   srq_init_attr.xrcd = cb->xrcd;
-  //   srq_init_attr.pd = cb->pd;
-  //   srq_init_attr.attr.max_sge = 1;
-  //   srq_init_attr.attr.max_wr = cb->conn_config.rq_depth;
-  //   srq_init_attr.cq = cb->conn_cq[0];
-  //   for(size_t i = 0;i<cb->conn_config.num_srqs;i++){
-      
-  //     cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
-  //     rt_assert(cb->srq != nullptr,"Failed to Create srq");
-  //   }
-  
-  // }
+    for (size_t i = 0; i < cb->conn_config.num_srqs; i++) {
+      cb->srq[i] = ibv_create_srq_ex(cb->resolve.ib_ctx, &srq_init_attr);
+      rt_assert(cb->srq[i] != nullptr, "Failed to Create XRC SRQ");
+    }
+  }
 
 #if (kHrdMlx5Atomics == false)
   for(int i = 0;i<cb->conn_config.num_qps;i++){
@@ -1013,15 +1016,16 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     create_attr.cap.max_recv_sge = 1;
     create_attr.cap.max_inline_data = kHrdMaxInline;
 
-    if(cb->conn_config.is_client){
-      create_attr.xrcd = cb->xrcd;
-    }
-    create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
-    create_attr.rnode_num = cb->conn_config.num_qps;
-    create_attr.srm_app_threads = cb->conn_config.srm_app_threads;
-    create_attr.srm_xrc_qp_num_per_srm = cb->conn_config.srm_xrc_qp_num_per_srm;
-    
-    
+	    if (cb->conn_config.is_client) {
+	      create_attr.xrcd = cb->xrcd;
+	    }
+	    create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
+	    create_attr.skip_kern_qp = cb->conn_config.is_client ? 1 : 0;
+	    //create_attr.rnode_num = cb->conn_config.num_qps;
+    //create_attr.srm_app_threads = cb->conn_config.srm_app_threads;
+    //create_attr.srm_xrc_qp_num_per_srm = cb->conn_config.srm_xrc_qp_num_per_srm;
+
+
 
     cb->conn_qp[i] = ibv_create_qp_ex(cb->resolve.ib_ctx, &create_attr);
     rt_assert(cb->conn_qp[i] != nullptr, "Failed to create conn QP");
@@ -1300,10 +1304,17 @@ void hrd_publish_conn_qp_srm(hrd_ctrl_blk_t* cb,int qp_idx, int srq_idx, const c
   for (size_t i = 0; i < len; i++) assert(qp_name[i] != ' ');
 
   hrd_qp_attr_t qp_attr;
+  memset(&qp_attr, 0, sizeof(qp_attr));
   strcpy(qp_attr.name, qp_name);
   qp_attr.lid = cb->resolve.port_lid;
   if(qp_idx >=0)
     qp_attr.qpn = cb->conn_qp[qp_idx]->qp_num;
+  if (srq_idx >= 0 && cb->conn_config.is_client) {
+    rt_assert(static_cast<size_t>(srq_idx) < cb->conn_config.num_srqs,
+              "SRM publish srq index out of range");
+    int ret = ibv_get_srq_num(cb->srq[srq_idx], &(qp_attr.srqn));
+    rt_assert(ret == 0, "Failed to get XRC SRQN");
+  }
   if (kRoCE) qp_attr.gid = cb->resolve.gid;
 
   qp_attr.buf_addr = reinterpret_cast<uint64_t>(cb->conn_buf);
