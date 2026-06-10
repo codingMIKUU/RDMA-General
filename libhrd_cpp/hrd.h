@@ -236,7 +236,11 @@ static inline void hrd_poll_cq(struct ibv_cq* cq, int num_comps,
     if (new_comps != 0) {
       // Ideally, we should check from comps -> new_comps - 1
       if (wc[comps].status != 0) {
-        fprintf(stderr, "Bad wc status %d\n", wc[comps].status);
+        fprintf(stderr,
+                "Bad wc status %d vendor_err %u wr_id %llu qp_num %u opcode %d\n",
+                wc[comps].status, wc[comps].vendor_err,
+                (unsigned long long)wc[comps].wr_id, wc[comps].qp_num,
+                wc[comps].opcode);
         exit(0);
       }
 
@@ -254,7 +258,11 @@ static inline int hrd_poll_cq_ret(struct ibv_cq* cq, int num_comps,
     if (new_comps != 0) {
       // Ideally, we should check from comps -> new_comps - 1
       if (wc[comps].status != 0) {
-        fprintf(stderr, "Bad wc status %d\n", wc[comps].status);
+        fprintf(stderr,
+                "Bad wc status %d vendor_err %u wr_id %llu qp_num %u opcode %d\n",
+                wc[comps].status, wc[comps].vendor_err,
+                (unsigned long long)wc[comps].wr_id, wc[comps].qp_num,
+                wc[comps].opcode);
         return -1;  // Return an error so the caller can clean up
       }
 

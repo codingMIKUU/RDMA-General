@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 2;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 8;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -545,8 +545,8 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = MB(1);
+      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      //real_sz = MB(1);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -923,7 +923,10 @@ void run_server_srm(thread_params_t* params) {
         }
         if(ret > 0){
           if(wc[0].status != IBV_WC_SUCCESS){
-            printf("poll cq error status:%d\n",wc[0].status);
+            printf("poll cq error status:%d vendor_err:%u wr_id:%llu qp_num:%u opcode:%d\n",
+                   wc[0].status, wc[0].vendor_err,
+                   (unsigned long long)wc[0].wr_id, wc[0].qp_num,
+                   wc[0].opcode);
             rt_assert(false);
           }
 
