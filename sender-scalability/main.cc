@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 2;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -75,6 +75,11 @@ DEFINE_uint64(test_lat_thread, 0, "Test latency thread");
 DEFINE_uint64(use_smart_rc, 0, "use Smart in RC");
 DEFINE_double(peak_bw_gbps, 0, "Peak software send bandwidth (Gbps), 0 = unlimited");
 DEFINE_uint64(measure_soft_bw, 0, "Measure per-thread software peak bandwidth");
+DEFINE_uint64(srm_active_qps, 0,
+              "SRM QPs used per server thread, 0 = all created QPs");
+DEFINE_uint64(srm_remote_targets, 0,
+              "SRM remote targets used per server thread, 0 = active QPs");
+DEFINE_uint64(srm_app_stats, 0, "Print SRM post/poll interval statistics");
 
 //peak_bw_gbps代表峰值带宽，单位是Gbps。这个参数用于限制软件发送数据的速率，
 static double measure_cycles_per_second() {
@@ -767,6 +772,19 @@ void run_server_srm(thread_params_t* params) {
 
   std::vector<hrd_qp_attr_t*> clt_qp(conn_config.num_qps, nullptr);
   const size_t total_remote_qps = conn_config.num_qps;
+  const size_t active_remote_qps =
+      FLAGS_srm_active_qps == 0
+          ? total_remote_qps
+          : std::min(static_cast<size_t>(FLAGS_srm_active_qps),
+                     total_remote_qps);
+  rt_assert(active_remote_qps > 0, "SRM active QP count must be non-zero");
+  const size_t active_remote_targets =
+      FLAGS_srm_remote_targets == 0
+          ? active_remote_qps
+          : std::min(static_cast<size_t>(FLAGS_srm_remote_targets),
+                     active_remote_qps);
+  rt_assert(active_remote_targets > 0,
+            "SRM remote target count must be non-zero");
   if (srv_gid != kAppNumServers) {
     for (size_t i = 0; i < kAppNumClients; i++) {
       char srv_qp_name[kHrdQPNameSize];
@@ -825,7 +843,8 @@ void run_server_srm(thread_params_t* params) {
   }
 
 
-  printf("main: Server %zu ready\n", srv_gid);
+  printf("main: Server %zu ready (local_qps=%zu remote_targets=%zu)\n",
+         srv_gid, active_remote_qps, active_remote_targets);
 
   struct ibv_send_wr wr, *bad_send_wr;
   struct ibv_sge sgl;
@@ -852,7 +871,68 @@ void run_server_srm(thread_params_t* params) {
   thread_barrier();
 
 
-  int nxt_post_wqe_nums = srv_gid == kAppNumServers ? kAppLatBatch: kAppUnsigBatch;
+  std::vector<size_t> qp_outstanding(total_remote_qps, 0);
+  size_t next_qp = 0;
+  size_t total_outstanding = 0;
+  uint64_t stat_post_calls = 0;
+  uint64_t stat_post_cycles = 0;
+  uint64_t stat_poll_calls = 0;
+  uint64_t stat_poll_cycles = 0;
+  uint64_t stat_poll_empty = 0;
+  uint64_t stat_poll_cqes = 0;
+  auto report_app_stats = [&](double seconds) {
+    if (!FLAGS_srm_app_stats)
+      return;
+
+    printf("SRM_APP_STATS server=%zu active_qps=%zu post_calls=%llu "
+           "post_avg_cycles=%.2f post_mops=%.3f poll_calls=%llu "
+           "poll_avg_cycles=%.2f poll_empty_pct=%.2f poll_cqes=%llu\n",
+           srv_gid, active_remote_qps,
+           static_cast<unsigned long long>(stat_post_calls),
+           stat_post_calls
+               ? static_cast<double>(stat_post_cycles) / stat_post_calls
+               : 0.0,
+           seconds > 0.0 ? stat_post_calls / seconds / 1e6 : 0.0,
+           static_cast<unsigned long long>(stat_poll_calls),
+           stat_poll_calls
+               ? static_cast<double>(stat_poll_cycles) / stat_poll_calls
+               : 0.0,
+           stat_poll_calls
+               ? 100.0 * static_cast<double>(stat_poll_empty) /
+                     stat_poll_calls
+               : 0.0,
+           static_cast<unsigned long long>(stat_poll_cqes));
+
+    stat_post_calls = 0;
+    stat_post_cycles = 0;
+    stat_poll_calls = 0;
+    stat_poll_cycles = 0;
+    stat_poll_empty = 0;
+    stat_poll_cqes = 0;
+  };
+  auto drain_qp_cqs = [&]() {
+    while (total_outstanding > 0) {
+      int ret = ibv_poll_cq(cb->conn_cq[0], kAppUnsigBatch, wc);
+      rt_assert(ret >= 0, "Failed to drain shared CQ");
+      for (int i = 0; i < ret; i++) {
+        size_t qp_index = static_cast<size_t>(wc[i].wr_id >> 32);
+
+        rt_assert(wc[i].status == IBV_WC_SUCCESS,
+                  "CQ error while draining shared CQ");
+        rt_assert(qp_index < active_remote_qps,
+                  "Invalid QP index in shared CQ wr_id");
+        rt_assert(qp_outstanding[qp_index] > 0,
+                  "Shared CQ returned QP without outstanding credit");
+        qp_outstanding[qp_index]--;
+        total_outstanding--;
+      }
+
+      if (ret == 0)
+        std::this_thread::yield();
+    }
+  };
+  int nxt_post_wqe_nums =
+      srv_gid == kAppNumServers ? kAppLatBatch : kAppUnsigBatch;
   while (1) {
     if (srv_gid != kAppNumServers) {
       if (rolling_iter >= KB(64)) {
@@ -862,6 +942,7 @@ void run_server_srm(thread_params_t* params) {
             (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
         double tput = rolling_iter / msr_seconds;
         double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
+        report_app_stats(msr_seconds);
 
         clock_gettime(CLOCK_REALTIME, &run_end);
         double run_seconds =
@@ -869,6 +950,7 @@ void run_server_srm(thread_params_t* params) {
             (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
         if (run_seconds >= FLAGS_run_time) {
           printf("main: Server %zu exiting.\n", srv_gid);
+          drain_qp_cqs();
           hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
@@ -915,36 +997,61 @@ void run_server_srm(thread_params_t* params) {
 
       
 
-      if(nxt_post_wqe_nums != kAppUnsigBatch){
-        int ret = ibv_poll_cq(cb->conn_cq[0], kAppUnsigBatch-nxt_post_wqe_nums, wc);
-        if (ret == -1) {
+      if (total_outstanding > 0) {
+        uint64_t poll_start = FLAGS_srm_app_stats ? rdtsc() : 0;
+        int ret = ibv_poll_cq(cb->conn_cq[0], kAppUnsigBatch, wc);
+        if (FLAGS_srm_app_stats) {
+          stat_poll_calls++;
+          stat_poll_cycles += rdtsc() - poll_start;
+          stat_poll_empty += ret == 0;
+          if (ret > 0)
+            stat_poll_cqes += static_cast<uint64_t>(ret);
+        }
+        if (ret < 0) {
           hrd_ctrl_blk_destroy_srm(cb);
           return;
         }
-        if(ret > 0){
-          if(wc[0].status != IBV_WC_SUCCESS){
+        for (int i = 0; i < ret; i++) {
+          size_t completed_qp =
+              static_cast<size_t>(wc[i].wr_id >> 32);
+
+          if (wc[i].status != IBV_WC_SUCCESS) {
             printf("poll cq error status:%d vendor_err:%u wr_id:%llu qp_num:%u opcode:%d\n",
-                   wc[0].status, wc[0].vendor_err,
-                   (unsigned long long)wc[0].wr_id, wc[0].qp_num,
-                   wc[0].opcode);
+                   wc[i].status, wc[i].vendor_err,
+                   (unsigned long long)wc[i].wr_id, wc[i].qp_num,
+                   wc[i].opcode);
             rt_assert(false);
           }
-
-          // //文件
-          // if(srv_gid == 0){
-          //   ed_lat = rdtsc();
-            
-          //   fprintf(log_file,"吞吐线程post_send cycles:%llu doorbell cycles:%llu, poll completions cycles:%llu\n,",lat_ed - lat_st,entry->cycles-lat_ed,ed_lat - entry->cycles);
-          //   fflush(log_file);
-          // }
+          rt_assert(completed_qp < active_remote_qps,
+                    "Invalid QP index in shared CQ wr_id");
+          rt_assert(qp_outstanding[completed_qp] > 0,
+                    "Shared CQ returned QP without outstanding credit");
+          qp_outstanding[completed_qp]--;
+          total_outstanding--;
         }
-        // if(ret>0)
-        //   printf("poll completions:%d\n",ret);
-        nxt_post_wqe_nums += ret;
       }
 
+      cn = active_remote_qps;
+      for (size_t checked = 0; checked < active_remote_qps; checked++) {
+        size_t candidate = next_qp;
 
+        next_qp = (next_qp + 1) % active_remote_qps;
+        if (qp_outstanding[candidate] < kAppUnsigBatch) {
+          cn = candidate;
+          break;
+        }
+      }
+      if (cn == active_remote_qps)
+        continue;
+
+      rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
+      nxt_post_wqe_nums =
+          static_cast<int>(kAppUnsigBatch - qp_outstanding[cn]);
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
+        const size_t remote_cn = cn % active_remote_targets;
+
+        rt_assert(clt_qp[remote_cn] != nullptr,
+                  "SRM remote target QP not connected");
         if (rolling_iter >= KB(64)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
@@ -952,6 +1059,7 @@ void run_server_srm(thread_params_t* params) {
               (msr_end.tv_nsec - msr_start.tv_nsec) / 1000000000.0;
           double tput = rolling_iter / msr_seconds;
           double tput_Gbps = tot_sz / msr_seconds / 1e9 * 8;
+          report_app_stats(msr_seconds);
 
           clock_gettime(CLOCK_REALTIME, &run_end);
           double run_seconds =
@@ -959,6 +1067,7 @@ void run_server_srm(thread_params_t* params) {
               (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
           if (run_seconds >= FLAGS_run_time) {
             printf("main: Server %zu exiting.\n", srv_gid);
+            drain_qp_cqs();
             hrd_ctrl_blk_destroy_srm(cb);
             return;
           }
@@ -1002,10 +1111,6 @@ void run_server_srm(thread_params_t* params) {
         }
         real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
         //real_sz = MB(1);
-        cn = hrd_fastrand(&seed) % remote_peer_count;
-        rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
-        rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
-
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
@@ -1018,7 +1123,8 @@ void run_server_srm(thread_params_t* params) {
         wr.num_sge = 1;
         wr.next = nullptr;
         wr.sg_list = &sgl;
-        wr.wr_id = rolling_iter;
+        wr.wr_id = (static_cast<uint64_t>(cn) << 32) |
+                   (rolling_iter & 0xffffffffULL);
 
         wr.send_flags =IBV_SEND_SIGNALED;
 
@@ -1028,11 +1134,12 @@ void run_server_srm(thread_params_t* params) {
 
         size_t remote_offset = 0;
         // size_t remote_offset = rolling_iter;
-        wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
+        wr.wr.rdma.remote_addr =
+            clt_qp[remote_cn]->buf_addr + remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
         // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-        wr.wr.rdma.rkey = clt_qp[cn]->rkey;
-        wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
+        wr.wr.rdma.rkey = clt_qp[remote_cn]->rkey;
+        wr.qp_type.xrc.remote_srqn = clt_qp[remote_cn]->srqn;
 
         // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
         //  printf("interface_id:0x%llx,
@@ -1047,7 +1154,12 @@ void run_server_srm(thread_params_t* params) {
         if(srv_gid == 0){
           lat_st = rdtsc();
         }
+        uint64_t post_start = FLAGS_srm_app_stats ? rdtsc() : 0;
         int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
+        if (FLAGS_srm_app_stats) {
+          stat_post_calls++;
+          stat_post_cycles += rdtsc() - post_start;
+        }
 
         // //文件
         // uint64_t ps_ed ;
@@ -1058,6 +1170,8 @@ void run_server_srm(thread_params_t* params) {
         
 
         rt_assert(ret == 0);
+        qp_outstanding[cn]++;
+        total_outstanding++;
         rolling_iter++;
 
         // printf("finish to post send, rolling_iter%d\n",rolling_iter);
@@ -1082,7 +1196,7 @@ void run_server_srm(thread_params_t* params) {
       
       for(int post_wqe_i = 0; post_wqe_i < nxt_post_wqe_nums; post_wqe_i++){
         real_sz = KB(1);
-        cn = hrd_fastrand(&seed) % remote_peer_count;
+      cn = hrd_fastrand(&seed) % remote_peer_count;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
 
