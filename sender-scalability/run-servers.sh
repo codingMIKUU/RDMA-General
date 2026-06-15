@@ -10,6 +10,8 @@ SRM_APP_STATS="${SRM_APP_STATS:-0}"
 USE_XRC="${USE_XRC:-0}"
 USE_SRM="${USE_SRM:-1}"
 TEST_LAT_THREAD="${TEST_LAT_THREAD:-1}"
+XRC_REMOTE_TARGETS="${XRC_REMOTE_TARGETS:-0}"
+XRC_QPS_PER_SERVER="${XRC_QPS_PER_SERVER:-2}"
 drop_shm
 
 blue "Reset server QP registry"
@@ -41,6 +43,8 @@ flags="
 	--measure_soft_bw 0 \
 	--srm_active_qps ${SRM_ACTIVE_QPS} \
 	--srm_remote_targets ${SRM_REMOTE_TARGETS} \
+	--xrc_remote_targets ${XRC_REMOTE_TARGETS} \
+	--xrc_qps_per_server ${XRC_QPS_PER_SERVER} \
 	--srm_app_stats ${SRM_APP_STATS}
 
 "
