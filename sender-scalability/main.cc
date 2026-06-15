@@ -41,7 +41,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 128;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -613,8 +613,10 @@ void run_server(thread_params_t* params) {
       // size_t remote_offset = hrd_fastrand(&seed) % (kAppBufSize -
       // FLAGS_size);
       size_t remote_offset = 0;
-      wr.wr.rdma.remote_addr = clt_qp[cn]->buf_addr + remote_offset;
-      wr.wr.rdma.rkey = clt_qp[cn]->rkey;
+      hrd_qp_attr_t* remote_mr =
+          cb->conn_config.use_xrc ? clt_qp[0] : clt_qp[cn];
+      wr.wr.rdma.remote_addr = remote_mr->buf_addr + remote_offset;
+      wr.wr.rdma.rkey = remote_mr->rkey;
       // wr.wr.rdma.remote_addr = 0;
       // wr.wr.rdma.rkey = 0;
       if (cb->conn_config.use_xrc)
@@ -1396,7 +1398,7 @@ void run_client(thread_params_t* params) {
   }
   if (conn_config.use_xrc)
     cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,
-                               fst_client_t);
+                               fst_client_t, srm_cb, srm_pd);
   else
     cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,srm_cb,srm_pd);
   // Set to some non-zero value so the server can detect READ completion
@@ -1733,8 +1735,8 @@ int main(int argc, char* argv[]) {
   }
   if(!FLAGS_is_client){
     // 初始化wqe表
-    //std::ifstream infile("AliStorage2019_traffic_size.txt");
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
+    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);

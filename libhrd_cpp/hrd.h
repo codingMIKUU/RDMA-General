@@ -159,6 +159,8 @@ struct hrd_ctrl_blk_t {
   } resolve;
 
   struct ibv_pd* pd;  // A protection domain for this control block
+  bool owns_pd;
+  bool owns_ib_context;
   //int xrcd_fd;
   struct ibv_xrcd* xrcd; //XRC domain
 
@@ -193,10 +195,12 @@ hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
 
 //specified for XRC
 hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index,
-                                         size_t numa_node,
-                                         hrd_conn_config_t* conn_config,
-                                         hrd_dgram_config_t* dgram_config,
-                                         bool fst_clt_t);
+                                      size_t numa_node,
+                                      hrd_conn_config_t* conn_config,
+                                      hrd_dgram_config_t* dgram_config,
+                                      bool fst_clt_t,
+                                      hrd_ctrl_blk_t* shared_cb = nullptr,
+                                      struct ibv_pd* shared_pd = nullptr);
   
 hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index,
                                          size_t numa_node,

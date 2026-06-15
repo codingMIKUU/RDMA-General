@@ -77,11 +77,15 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
   if(srm_cb != nullptr && srm_pd != nullptr){
     memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
     cb->pd = srm_pd;
+    cb->owns_pd = false;
+    cb->owns_ib_context = false;
     printf("use srm pd and cb\n");
   } else {
     // Resolve the port into cb->resolve
     hrd_resolve_port_index(cb, port_index);
     cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+    cb->owns_pd = true;
+    cb->owns_ib_context = true;
     printf("use default pd and cb\n");
   }
 
@@ -178,7 +182,9 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
                                          size_t numa_node,
                                          hrd_conn_config_t* conn_config,
                                          hrd_dgram_config_t* dgram_config,
-                                         bool fst_clt_t) {
+                                         bool fst_clt_t,
+                                         hrd_ctrl_blk_t* shared_cb,
+                                         struct ibv_pd* shared_pd) {
   if (kHrdMlx5Atomics) {
     rt_assert(!kRoCE, "mlx5 atomics not supported with RoCE");
     hrd_red_printf(
@@ -238,10 +244,17 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
       assert(cb->dgram_buf_shm_key == -1);
     }
   }
-  // Resolve the port into cb->resolve
-  hrd_resolve_port_index(cb, port_index);
-  // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
-  cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+  if (shared_cb != nullptr && shared_pd != nullptr) {
+    memcpy(&cb->resolve, &shared_cb->resolve, sizeof(cb->resolve));
+    cb->pd = shared_pd;
+    cb->owns_pd = false;
+    cb->owns_ib_context = false;
+  } else {
+    hrd_resolve_port_index(cb, port_index);
+    cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+    cb->owns_pd = true;
+    cb->owns_ib_context = true;
+  }
 
   //server -> client，client端建立处理XRCD
   if(cb->conn_config.use_xrc&&cb->conn_config.is_client){
@@ -407,12 +420,16 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
   if(srm_cb != nullptr && srm_pd != nullptr){
     memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
     cb->pd = srm_pd;
+    cb->owns_pd = false;
+    cb->owns_ib_context = false;
     printf("use srm pd and cb\n");
     //sleep(1);
 
   } else {
     hrd_resolve_port_index(cb, port_index);
     cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+    cb->owns_pd = true;
+    cb->owns_ib_context = true;
     printf("error\n");
   }
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
@@ -596,12 +613,12 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
                 "Failed to close XRCD backing file");
   }
 
-  // Destroy protection domain
-  rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
+  if (cb->owns_pd)
+    rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
 
-  // Destroy device context
-  rt_assert(ibv_close_device(cb->resolve.ib_ctx) == 0,
-            "Failed to close device");
+  if (cb->owns_ib_context)
+    rt_assert(ibv_close_device(cb->resolve.ib_ctx) == 0,
+              "Failed to close device");
 
   hrd_red_printf("HRD: Control block %d destroyed.\n", cb->local_hid);
   return 0;
