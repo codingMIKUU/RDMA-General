@@ -375,8 +375,7 @@ void run_server(thread_params_t* params) {
   printf("main: Server %zu ready (xrc_qps=%zu xrc_remote_targets=%zu "
          "targets_per_qp=%zu)\n",
          srv_gid, xrc_qps_per_server, xrc_remote_targets,
-         (xrc_remote_targets + xrc_qps_per_server - 1) /
-             xrc_qps_per_server);
+         xrc_remote_targets);
 
 // 注册本线程所有要轮询的CQ，供SMART在积分不足时轮询多个CQ
   std::vector<size_t> nxt_poll_num(cb->conn_config.num_qps, kAppUnsigBatch);
@@ -499,9 +498,16 @@ void run_server(thread_params_t* params) {
       }
 
       // Choose the next client to send a packet to
-      size_t cn = (hrd_fastrand(&seed)) % xrc_remote_targets;
-      //cn = (cn + 1) % kAppNumClients;
-      qp_cn = cb->conn_config.use_xrc ? cn % xrc_qps_per_server : cn;
+      const uint32_t target_rand = hrd_fastrand(&seed);
+      size_t cn;
+      if (cb->conn_config.use_xrc) {
+        // Keep every physical XRC_SEND QP active at every target count.
+        qp_cn = target_rand % xrc_qps_per_server;
+        cn = (target_rand / xrc_qps_per_server) % xrc_remote_targets;
+      } else {
+        cn = target_rand % kAppNumClients;
+        qp_cn = cn;
+      }
       memset(&wr, 0, sizeof(wr));
       wr.opcode = opcode;
       wr.num_sge = 1;
