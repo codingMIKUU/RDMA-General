@@ -4,6 +4,9 @@ source $(dirname $0)/../scripts/mlx_env.sh
 export HRD_REGISTRY_IP="192.168.1.5"
 # export HRD_REGISTRY_IP="192.168.1.5"
 export MLX5_SINGLE_THREADED=0
+USE_XRC="${USE_XRC:-0}"
+USE_SRM="${USE_SRM:-0}"
+TEST_LAT_THREAD="${TEST_LAT_THREAD:-1}"
 drop_shm
 
 # lsync messes up permissions
@@ -31,10 +34,10 @@ flags="\
   --run_time 1000 \
 	--is_client 1 \
 	--machine_id $1 \
-  --use_xrc 0 \
-  --test_lat 0 \ 
-  --use_srm 0 \
-  --test_lat_thread 1
+	  --use_xrc 1 \
+	  --test_lat 0 \
+	  --use_srm 0 \
+	  --test_lat_thread 0
 "
 
 # Check for non-gdb mode

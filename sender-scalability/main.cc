@@ -41,10 +41,10 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
-static constexpr size_t kAppLatBatch = 1;
+static constexpr size_t kAppLatBatch = 1; 
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -246,7 +246,7 @@ void run_server(thread_params_t* params) {
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   int clt_num_threads = kAppNumClients / kAppNumClientMachines;  // for xrc only
 
-  hrd_conn_config_t conn_config;
+  hrd_conn_config_t conn_config{};
   conn_config.num_qps =
       (FLAGS_use_xrc ? kAppNumClientMachines : kAppNumClients);
   if (srv_gid == kAppNumServers && FLAGS_test_lat_thread) {
@@ -257,7 +257,9 @@ void run_server(thread_params_t* params) {
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
-  conn_config.use_xrc = false;
+  conn_config.use_xrc = FLAGS_use_xrc != 0;
+  conn_config.num_srqs = 0;
+  conn_config.xrcd_fd = -1;
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
   conn_config.isSmall = (srv_gid == kAppNumServers && FLAGS_test_lat_thread) ? 1 : 0;
@@ -328,7 +330,8 @@ void run_server(thread_params_t* params) {
 
       if (!cb->conn_config.use_xrc || i % clt_num_threads == 0) {
         printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-        hrd_connect_qp(cb, i, clt_qp[i]);
+        size_t local_qp = cb->conn_config.use_xrc ? i / clt_num_threads : i;
+        hrd_connect_qp(cb, local_qp, clt_qp[i]);
         hrd_wait_till_ready(clt_qp_name);
       }
       print_qp_info(clt_qp[i]);
@@ -398,7 +401,7 @@ void run_server(thread_params_t* params) {
             (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
         if (run_seconds >= FLAGS_run_time) {
           printf("main: Server %zu exiting.\n", srv_gid);
-          hrd_ctrl_blk_destroy_srm(cb);
+          hrd_ctrl_blk_destroy(cb);
           return;
         }
 
@@ -461,6 +464,7 @@ void run_server(thread_params_t* params) {
       size_t cn = (hrd_fastrand(&seed)) % kAppNumClients;
       //cn = (cn + 1) % kAppNumClients;
       qp_cn = cb->conn_config.use_xrc ? cn / clt_num_threads : cn;
+      memset(&wr, 0, sizeof(wr));
       wr.opcode = opcode;
       wr.num_sge = 1;
       wr.next = nullptr;
@@ -569,7 +573,8 @@ void run_server(thread_params_t* params) {
       wr.wr.rdma.rkey = clt_qp[cn]->rkey;
       // wr.wr.rdma.remote_addr = 0;
       // wr.wr.rdma.rkey = 0;
-      wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
+      if (cb->conn_config.use_xrc)
+        wr.qp_type.xrc.remote_srqn = clt_qp[cn]->srqn;
       nb_tx[qp_cn]++;
       if (FLAGS_test_lat) {
         clock_gettime(CLOCK_REALTIME, &lat_start);
@@ -730,7 +735,7 @@ void run_server_srm(thread_params_t* params) {
                                  ? 1
                                  : kAppNumClients;
 
-  hrd_conn_config_t conn_config;
+  hrd_conn_config_t conn_config{};
   conn_config.num_qps = remote_peer_count;
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
@@ -1287,7 +1292,7 @@ void run_client(thread_params_t* params) {
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : clt_gid % 2;
   int shm_key = kAppBaseSHMKey + clt_gid % num_threads;
 
-  hrd_conn_config_t conn_config;
+  hrd_conn_config_t conn_config{};
   {
     // 等待逻辑：确保按 clt_gid 顺序启动客户端线程
     std::unique_lock<std::mutex> lock(barrier_mutex);
@@ -1295,22 +1300,29 @@ void run_client(thread_params_t* params) {
     barrier_cv.wait(lock, [&]() { return barrier_count == clt_gid; });
   }
 
-  // xrcd fd
-  conn_config.xrcd_fd =
-      open(SERVER_XRCD_FILE_PATH, O_RDONLY | O_CREAT, S_IRUSR | S_IRGRP);
+  // All client threads open the same inode so their XRC resources share an XRCD.
+  conn_config.use_xrc = FLAGS_use_xrc != 0;
+  conn_config.xrcd_fd = -1;
+  if (conn_config.use_xrc) {
+    conn_config.xrcd_fd =
+        open(SERVER_XRCD_FILE_PATH, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    rt_assert(conn_config.xrcd_fd >= 0, "Failed to open XRCD backing file");
+  }
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid % num_threads == 0);
-  conn_config.use_xrc = false;
   conn_config.num_qps =
-      (!FLAGS_use_xrc || conn_config.fst_client_t ? kAppNumServers : 0);
+      (!conn_config.use_xrc || conn_config.fst_client_t ? kAppNumServers : 0);
+  conn_config.num_srqs = conn_config.use_xrc ? kAppNumServers : 0;
   conn_config.rnum_threads = kAppNumServers;
   if (clt_gid == kAppNumClients) {
     conn_config.num_qps = 1;
+    conn_config.num_srqs = conn_config.use_xrc ? 1 : 0;
     conn_config.rnum_threads = 1;
+    conn_config.fst_client_t = true;
   }
 
   bool fst_client_t = conn_config.fst_client_t;
@@ -1613,6 +1625,10 @@ int main(int argc, char* argv[]) {
   rt_assert(FLAGS_dual_port <= 1, "Invalid dual_port");
   rt_assert(FLAGS_use_uc <= 1, "Invalid use_uc");
   rt_assert(FLAGS_is_client <= 1, "Invalid is_client");
+  rt_assert(!(FLAGS_use_xrc && FLAGS_use_srm),
+            "Native XRC requires --use_srm=0");
+  rt_assert(!(FLAGS_use_xrc && FLAGS_use_uc),
+            "XRC is a reliable transport and cannot use UC mode");
   rt_assert(kAppNumClients % kAppNumClientMachines == 0,
             "NumClients must can be div by NumMachines");
   if(!FLAGS_use_srm && FLAGS_use_smart_rc){    
@@ -1623,8 +1639,8 @@ int main(int argc, char* argv[]) {
   }
   if(!FLAGS_is_client){
     // 初始化wqe表
-    std::ifstream infile("AliStorage2019_traffic_size.txt");
-    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    //std::ifstream infile("AliStorage2019_traffic_size.txt");
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);

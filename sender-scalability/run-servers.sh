@@ -7,6 +7,9 @@ export MLX5_SRM_STATS="${MLX5_SRM_STATS:-0}"
 SRM_ACTIVE_QPS="${SRM_ACTIVE_QPS:-0}"
 SRM_REMOTE_TARGETS="${SRM_REMOTE_TARGETS:-0}"
 SRM_APP_STATS="${SRM_APP_STATS:-0}"
+USE_XRC="${USE_XRC:-0}"
+USE_SRM="${USE_SRM:-1}"
+TEST_LAT_THREAD="${TEST_LAT_THREAD:-1}"
 drop_shm
 
 blue "Reset server QP registry"
@@ -29,10 +32,10 @@ flags="
 	--size 8192 \
 	--run_time 20000 \
 	--do_read 0 \
-	--use_xrc 0 \
+		--use_xrc 1 \
 	--test_lat 0 \
-	--use_srm 1 \
-	--test_lat_thread 1 \
+		--use_srm  0\
+		--test_lat_thread 0\
 	--use_smart_rc 0 \
 	--peak_bw_gbps 0 \
 	--measure_soft_bw 0 \
