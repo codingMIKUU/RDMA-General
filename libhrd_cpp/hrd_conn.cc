@@ -300,7 +300,8 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
   // Create and register connected QP RDMA buffer.
   if (cb->conn_config.num_qps >= 1 || cb->conn_config.rnum_threads >= 1) {
     const size_t cq_count = cb->conn_config.is_client
-                                ? cb->conn_config.num_srqs
+                                ? std::max(cb->conn_config.num_qps,
+                                           cb->conn_config.num_srqs)
                                 : cb->conn_config.num_qps;
 
     if (cb->conn_config.is_client && !fst_clt_t) {
@@ -315,9 +316,6 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
     rt_assert(!cb->conn_config.is_client ||
                   cb->conn_config.num_srqs == cb->conn_config.rnum_threads,
               "XRC client requires one SRQ per remote server");
-    rt_assert(!cb->conn_config.is_client || !fst_clt_t ||
-                  cb->conn_config.num_qps == cb->conn_config.num_srqs,
-              "XRC receive QP and SRQ counts must match");
     hrd_create_conn_qps_xrc(cb);
     // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
     if (conn_config->prealloc_buf == nullptr) {
@@ -525,7 +523,8 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
     }
 
     const size_t cq_count = cb->conn_config.is_client
-                                ? cb->conn_config.num_srqs
+                                ? std::max(cb->conn_config.num_qps,
+                                           cb->conn_config.num_srqs)
                                 : cb->conn_config.num_qps;
     for (size_t i = 0; i < cq_count; i++)
       rt_assert(ibv_destroy_cq(cb->conn_cq[i]) == 0,
@@ -867,7 +866,8 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
 
 void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
   const size_t resource_count = cb->conn_config.is_client
-                                    ? cb->conn_config.num_srqs
+                                    ? std::max(cb->conn_config.num_qps,
+                                               cb->conn_config.num_srqs)
                                     : cb->conn_config.num_qps;
 
   assert(cb->pd != nullptr && cb->resolve.ib_ctx != nullptr);
@@ -879,7 +879,7 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
     rt_assert(cb->conn_cq[i] != nullptr,
               "Failed to create conn CQ. Check hugepages and SHM limits?");
 
-    if (cb->conn_config.is_client) {
+    if (cb->conn_config.is_client && i < cb->conn_config.num_srqs) {
       ibv_srq_init_attr_ex srq_init_attr;
       memset(&srq_init_attr, 0, sizeof(srq_init_attr));
       srq_init_attr.comp_mask =
@@ -895,7 +895,8 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
       rt_assert(cb->srq[i] != nullptr, "Failed to create XRC SRQ");
     }
 
-    if (cb->conn_config.is_client && !cb->conn_config.fst_client_t)
+    if (cb->conn_config.is_client &&
+        (!cb->conn_config.fst_client_t || i >= cb->conn_config.num_qps))
       continue;
 #if (kHrdMlx5Atomics == false)
     struct ibv_qp_init_attr_ex create_attr;

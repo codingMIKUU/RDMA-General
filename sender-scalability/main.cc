@@ -41,7 +41,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 16;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -80,6 +80,10 @@ DEFINE_uint64(srm_active_qps, 0,
 DEFINE_uint64(srm_remote_targets, 0,
               "SRM remote targets used per server thread, 0 = active QPs");
 DEFINE_uint64(srm_app_stats, 0, "Print SRM post/poll interval statistics");
+DEFINE_uint64(xrc_remote_targets, 0,
+              "XRC remote SRQ/MR targets per send QP, 0 = all clients");
+DEFINE_uint64(xrc_qps_per_server, 1,
+              "XRC send QPs per server thread");
 
 //peak_bw_gbps代表峰值带宽，单位是Gbps。这个参数用于限制软件发送数据的速率，
 static double measure_cycles_per_second() {
@@ -244,11 +248,13 @@ void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
   size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
-  int clt_num_threads = kAppNumClients / kAppNumClientMachines;  // for xrc only
+  const size_t xrc_qps_per_server =
+      FLAGS_use_xrc ? static_cast<size_t>(FLAGS_xrc_qps_per_server) : 1;
 
   hrd_conn_config_t conn_config{};
   conn_config.num_qps =
-      (FLAGS_use_xrc ? kAppNumClientMachines : kAppNumClients);
+      (FLAGS_use_xrc ? xrc_qps_per_server * kAppNumClientMachines
+                     : kAppNumClients);
   if (srv_gid == kAppNumServers && FLAGS_test_lat_thread) {
     // lat thread
     conn_config.num_qps = 1;
@@ -292,7 +298,12 @@ void run_server(thread_params_t* params) {
 
   for (size_t i = 0; i < conn_config.num_qps; i++) {
     char srv_qp_name[kHrdQPNameSize];
-    size_t clt_id = (cb->conn_config.use_xrc ? i * clt_num_threads : i);
+    if (cb->conn_config.use_xrc) {
+      sprintf(srv_qp_name, "server-xrc-%zu-%zu", srv_gid, i);
+      hrd_publish_conn_qp(cb, i, srv_qp_name);
+      continue;
+    }
+    size_t clt_id = i;
     if (srv_gid == kAppNumServers && FLAGS_test_lat_thread) {
       clt_id = kAppNumClients;
     }
@@ -318,6 +329,23 @@ void run_server(thread_params_t* params) {
 
     print_qp_info(clt_qp[0]);
   } else {
+    if (cb->conn_config.use_xrc) {
+      for (size_t lane = 0; lane < xrc_qps_per_server; lane++) {
+        char clt_xrc_qp_name[kHrdQPNameSize];
+        sprintf(clt_xrc_qp_name, "client-xrc-qp-%zu-%zu", srv_gid, lane);
+
+        hrd_qp_attr_t* clt_xrc_qp = nullptr;
+        while (clt_xrc_qp == nullptr) {
+          clt_xrc_qp = hrd_get_published_qp(clt_xrc_qp_name);
+          if (clt_xrc_qp == nullptr) usleep(20000);
+        }
+
+        printf("main: Server %zu connecting XRC lane %zu\n", srv_gid, lane);
+        hrd_connect_qp(cb, lane, clt_xrc_qp);
+        hrd_wait_till_ready(clt_xrc_qp_name);
+      }
+    }
+
     for (size_t i = 0; i < kAppNumClients; i++) {
       char clt_qp_name[kHrdQPNameSize];
       sprintf(clt_qp_name, "client-%zu-%zu", i, srv_gid);
@@ -328,17 +356,27 @@ void run_server(thread_params_t* params) {
         if (clt_qp[i] == nullptr) usleep(20000);
       }
 
-      if (!cb->conn_config.use_xrc || i % clt_num_threads == 0) {
+      if (!cb->conn_config.use_xrc) {
         printf("main: Server %zu found client %zu! Connecting..\n", srv_gid, i);
-        size_t local_qp = cb->conn_config.use_xrc ? i / clt_num_threads : i;
-        hrd_connect_qp(cb, local_qp, clt_qp[i]);
+        hrd_connect_qp(cb, i, clt_qp[i]);
         hrd_wait_till_ready(clt_qp_name);
       }
       print_qp_info(clt_qp[i]);
     }
   }
 
-  printf("main: Server %zu ready\n", srv_gid);
+  const size_t xrc_remote_targets =
+      !cb->conn_config.use_xrc || FLAGS_xrc_remote_targets == 0
+          ? kAppNumClients
+          : std::min(static_cast<size_t>(FLAGS_xrc_remote_targets),
+                     kAppNumClients);
+  rt_assert(xrc_remote_targets > 0,
+            "XRC remote target count must be non-zero");
+  printf("main: Server %zu ready (xrc_qps=%zu xrc_remote_targets=%zu "
+         "targets_per_qp=%zu)\n",
+         srv_gid, xrc_qps_per_server, xrc_remote_targets,
+         (xrc_remote_targets + xrc_qps_per_server - 1) /
+             xrc_qps_per_server);
 
 // 注册本线程所有要轮询的CQ，供SMART在积分不足时轮询多个CQ
   std::vector<size_t> nxt_poll_num(cb->conn_config.num_qps, kAppUnsigBatch);
@@ -461,9 +499,9 @@ void run_server(thread_params_t* params) {
       }
 
       // Choose the next client to send a packet to
-      size_t cn = (hrd_fastrand(&seed)) % kAppNumClients;
+      size_t cn = (hrd_fastrand(&seed)) % xrc_remote_targets;
       //cn = (cn + 1) % kAppNumClients;
-      qp_cn = cb->conn_config.use_xrc ? cn / clt_num_threads : cn;
+      qp_cn = cb->conn_config.use_xrc ? cn % xrc_qps_per_server : cn;
       memset(&wr, 0, sizeof(wr));
       wr.opcode = opcode;
       wr.num_sge = 1;
@@ -1314,8 +1352,16 @@ void run_client(thread_params_t* params) {
   conn_config.buf_shm_key = shm_key;
   conn_config.is_client = true;
   conn_config.fst_client_t = (clt_gid % num_threads == 0);
+  const size_t xrc_qps_per_server =
+      conn_config.use_xrc
+          ? static_cast<size_t>(FLAGS_xrc_qps_per_server)
+          : 1;
   conn_config.num_qps =
-      (!conn_config.use_xrc || conn_config.fst_client_t ? kAppNumServers : 0);
+      (!conn_config.use_xrc
+           ? kAppNumServers
+           : (conn_config.fst_client_t
+                  ? kAppNumServers * xrc_qps_per_server
+                  : 0));
   conn_config.num_srqs = conn_config.use_xrc ? kAppNumServers : 0;
   conn_config.rnum_threads = kAppNumServers;
   if (clt_gid == kAppNumClients) {
@@ -1354,9 +1400,24 @@ void run_client(thread_params_t* params) {
     for (size_t i = 0; i < kAppNumServers; i++) {
       char clt_qp_name[kHrdQPNameSize];
       sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
-      hrd_publish_conn_qp(cb, i, clt_qp_name);
+      if (cb->conn_config.use_xrc)
+        hrd_publish_conn_qp_srm(cb, -1, i, clt_qp_name);
+      else
+        hrd_publish_conn_qp(cb, i, clt_qp_name);
     }
-    if (!cb->conn_config.use_xrc || fst_client_t) {
+    if (cb->conn_config.use_xrc && fst_client_t) {
+      for (size_t server = 0; server < kAppNumServers; server++) {
+        for (size_t lane = 0; lane < xrc_qps_per_server; lane++) {
+          const size_t qp_idx = server * xrc_qps_per_server + lane;
+          char clt_xrc_qp_name[kHrdQPNameSize];
+          sprintf(clt_xrc_qp_name, "client-xrc-qp-%zu-%zu", server, lane);
+          hrd_publish_conn_qp_srm(cb, static_cast<int>(qp_idx),
+                                  static_cast<int>(server),
+                                  clt_xrc_qp_name);
+        }
+      }
+    }
+    if (!cb->conn_config.use_xrc) {
       for (size_t i = 0; i < kAppNumServers; i++) {
         char srv_qp_name[kHrdQPNameSize];
         sprintf(srv_qp_name, "server-%zu-%zu", i, clt_gid);
@@ -1374,6 +1435,28 @@ void run_client(thread_params_t* params) {
         sprintf(clt_qp_name, "client-%zu-%zu", clt_gid, i);
         hrd_publish_ready(clt_qp_name);
         print_qp_info(srv_qp);
+      }
+    } else if (fst_client_t) {
+      for (size_t server = 0; server < kAppNumServers; server++) {
+        for (size_t lane = 0; lane < xrc_qps_per_server; lane++) {
+          const size_t qp_idx = server * xrc_qps_per_server + lane;
+          char srv_qp_name[kHrdQPNameSize];
+          sprintf(srv_qp_name, "server-xrc-%zu-%zu", server, lane);
+
+          hrd_qp_attr_t* srv_qp = nullptr;
+          while (srv_qp == nullptr) {
+            srv_qp = hrd_get_published_qp(srv_qp_name);
+            if (srv_qp == nullptr) usleep(20000);
+          }
+
+          printf("main: Client %zu connecting server %zu XRC lane %zu\n",
+                 clt_gid, server, lane);
+          hrd_connect_qp(cb, qp_idx, srv_qp);
+
+          char clt_xrc_qp_name[kHrdQPNameSize];
+          sprintf(clt_xrc_qp_name, "client-xrc-qp-%zu-%zu", server, lane);
+          hrd_publish_ready(clt_xrc_qp_name);
+        }
       }
     }
   } else {
@@ -1629,6 +1712,11 @@ int main(int argc, char* argv[]) {
             "Native XRC requires --use_srm=0");
   rt_assert(!(FLAGS_use_xrc && FLAGS_use_uc),
             "XRC is a reliable transport and cannot use UC mode");
+  rt_assert(!FLAGS_use_xrc || FLAGS_xrc_qps_per_server > 0,
+            "XRC QPs per server must be non-zero");
+  rt_assert(!FLAGS_use_xrc ||
+                FLAGS_xrc_qps_per_server <= kAppNumClients,
+            "XRC QPs per server cannot exceed client count");
   rt_assert(kAppNumClients % kAppNumClientMachines == 0,
             "NumClients must can be div by NumMachines");
   if(!FLAGS_use_srm && FLAGS_use_smart_rc){    
@@ -1639,8 +1727,8 @@ int main(int argc, char* argv[]) {
   }
   if(!FLAGS_is_client){
     // 初始化wqe表
-    //std::ifstream infile("AliStorage2019_traffic_size.txt");
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
+    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);
