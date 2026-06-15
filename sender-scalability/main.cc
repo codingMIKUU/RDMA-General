@@ -868,6 +868,7 @@ void run_server_srm(thread_params_t* params) {
 
   auto opcode = FLAGS_do_read == 0 ? IBV_WR_RDMA_WRITE : IBV_WR_RDMA_READ;
   uint64_t seed = seed_array[srv_gid];
+  uint64_t route_seed = seed_array[srv_gid] ^ 0x9e3779b97f4a7c15ULL;
   size_t  cn;
   cn = -1;
 
@@ -1053,7 +1054,8 @@ void run_server_srm(thread_params_t* params) {
       nxt_post_wqe_nums =
           static_cast<int>(kAppUnsigBatch - qp_outstanding[cn]);
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
-        const size_t remote_cn = cn % active_remote_targets;
+        const size_t remote_cn =
+            hrd_fastrand(&route_seed) % active_remote_targets;
 
         rt_assert(clt_qp[remote_cn] != nullptr,
                   "SRM remote target QP not connected");
