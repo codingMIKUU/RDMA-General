@@ -154,6 +154,9 @@ int barrier_count = 0;               // 到达线程墙的线程计数
 std::mutex shared_mutex;             // 共享cb和pd的互斥锁
 std::condition_variable shared_cv;   // 共享cb和pd的条件变量
 bool shared_ready = false;           // 共享cb和pd是否准备好
+volatile uint8_t* xrc_shared_conn_buf = nullptr;
+int xrc_shared_conn_shm_key = kAppBaseSHMKey + kAppNumClients +
+                              kAppNumServers + 4096;
 // 线程墙实现
 
 
@@ -1385,6 +1388,15 @@ void run_client(thread_params_t* params) {
     memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
     hrd_resolve_port_index(srm_cb, 0);
     srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+    if (conn_config.use_xrc) {
+      size_t reg_size = 0;
+      while (reg_size < conn_config.buf_size) reg_size += MB(2);
+      xrc_shared_conn_buf = reinterpret_cast<volatile uint8_t*>(
+          hrd_malloc_socket(xrc_shared_conn_shm_key, reg_size, 0));
+      rt_assert(xrc_shared_conn_buf != nullptr,
+                "Failed to allocate shared XRC conn buffer");
+      memset(const_cast<uint8_t*>(xrc_shared_conn_buf), 1, reg_size);
+    }
     {
         std::unique_lock<std::mutex> lock(shared_mutex);
         shared_ready = true;
@@ -1393,6 +1405,12 @@ void run_client(thread_params_t* params) {
   } else {
     std::unique_lock<std::mutex> lock(shared_mutex);
     shared_cv.wait(lock, []{ return shared_ready; });
+  }
+  if (conn_config.use_xrc) {
+    rt_assert(xrc_shared_conn_buf != nullptr,
+              "Shared XRC conn buffer is not ready");
+    conn_config.prealloc_buf = xrc_shared_conn_buf;
+    conn_config.buf_shm_key = -1;
   }
   if (conn_config.use_xrc)
     cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,

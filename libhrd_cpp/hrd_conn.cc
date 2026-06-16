@@ -574,14 +574,16 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
         return -1;
       }
 
-      if (cb->numa_node != kHrdInvalidNUMANode) {
-        if (hrd_free(cb->conn_config.buf_shm_key,
-                    const_cast<uint8_t*>(cb->conn_buf))) {
-          fprintf(stderr, "HRD: Error freeing conn hugepages for cb %zu\n",
-                  cb->local_hid);
+      if (cb->conn_config.prealloc_buf == nullptr) {
+        if (cb->numa_node != kHrdInvalidNUMANode) {
+          if (hrd_free(cb->conn_config.buf_shm_key,
+                      const_cast<uint8_t*>(cb->conn_buf))) {
+            fprintf(stderr, "HRD: Error freeing conn hugepages for cb %zu\n",
+                    cb->local_hid);
+          }
+        } else {
+          free(const_cast<uint8_t*>(cb->conn_buf));
         }
-      } else {
-        free(const_cast<uint8_t*>(cb->conn_buf));
       }
     }
   }
