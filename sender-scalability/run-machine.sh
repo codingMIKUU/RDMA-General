@@ -31,10 +31,10 @@ flags="\
   --run_time 1000 \
 	--is_client 1 \
 	--machine_id $1 \
-  --use_xrc 0 \
-  --test_lat 0 \ 
-  --use_srm 0 \
-  --test_lat_thread 1
+	--use_xrc 0 \
+	--test_lat 0 \
+	--use_srm 0 \
+	--test_lat_thread 0
 "
 
 # Check for non-gdb mode
