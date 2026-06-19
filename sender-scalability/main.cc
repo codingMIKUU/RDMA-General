@@ -41,10 +41,11 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 128;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
+static constexpr size_t kNativeRcSQDepth = 128;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -269,6 +270,8 @@ void run_server(thread_params_t* params) {
   conn_config.is_client = false;
   conn_config.fst_client_t = false;
   conn_config.isSmall = (srv_gid == kAppNumServers && FLAGS_test_lat_thread) ? 1 : 0;
+  if (!conn_config.use_xrc)
+    conn_config.sq_depth = kNativeRcSQDepth;
   // if(FLAGS_use_xrc)
   //   conn_config.sq_depth = kHrdSQDepth*10;
 
@@ -289,7 +292,8 @@ void run_server(thread_params_t* params) {
 
   hrd_ctrl_blk_t* cb;
   if (conn_config.use_xrc == 0)
-    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,srm_cb,srm_pd);
+    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+                           nullptr, nullptr);
   else
     cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 0, &conn_config, nullptr,
                                0);
@@ -365,17 +369,21 @@ void run_server(thread_params_t* params) {
     }
   }
 
-  const size_t xrc_remote_targets =
-      !cb->conn_config.use_xrc || FLAGS_xrc_remote_targets == 0
-          ? kAppNumClients
-          : std::min(static_cast<size_t>(FLAGS_xrc_remote_targets),
-                     kAppNumClients);
-  rt_assert(xrc_remote_targets > 0,
-            "XRC remote target count must be non-zero");
-  printf("main: Server %zu ready (xrc_qps=%zu xrc_remote_targets=%zu "
-         "targets_per_qp=%zu)\n",
-         srv_gid, xrc_qps_per_server, xrc_remote_targets,
-         xrc_remote_targets);
+  size_t xrc_remote_targets = kAppNumClients;
+  if (cb->conn_config.use_xrc) {
+    xrc_remote_targets =
+        FLAGS_xrc_remote_targets == 0
+            ? kAppNumClients
+            : std::min(static_cast<size_t>(FLAGS_xrc_remote_targets),
+                       kAppNumClients);
+    rt_assert(xrc_remote_targets > 0,
+              "XRC remote target count must be non-zero");
+    printf("main: Server %zu ready (xrc_qps=%zu xrc_remote_targets=%zu)\n",
+           srv_gid, xrc_qps_per_server, xrc_remote_targets);
+  } else {
+    printf("main: Server %zu ready (native_rc_qps=%zu sq_depth=%zu)\n",
+           srv_gid, conn_config.num_qps, conn_config.sq_depth);
+  }
 
 // 注册本线程所有要轮询的CQ，供SMART在积分不足时轮询多个CQ
   std::vector<size_t> nxt_poll_num(cb->conn_config.num_qps, kAppUnsigBatch);
@@ -662,6 +670,7 @@ void run_server(thread_params_t* params) {
       // }
 
       rt_assert(ret == 0);
+      nb_tx_tot++;
       if (FLAGS_measure_soft_bw && soft_burst_active) {
         soft_burst_bytes += sgl.length;
         size_t now_cycles = hrd_get_cycles();
@@ -1370,6 +1379,8 @@ void run_client(thread_params_t* params) {
                   : 0));
   conn_config.num_srqs = conn_config.use_xrc ? kAppNumServers : 0;
   conn_config.rnum_threads = kAppNumServers;
+  if (!conn_config.use_xrc)
+    conn_config.sq_depth = kNativeRcSQDepth;
   if (clt_gid == kAppNumClients) {
     conn_config.num_qps = 1;
     conn_config.num_srqs = conn_config.use_xrc ? 1 : 0;
@@ -1380,25 +1391,12 @@ void run_client(thread_params_t* params) {
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
  
-  if (clt_gid == 0) {
-    srm_cb = new hrd_ctrl_blk_t();
-    memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb, 0);
-    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
-    {
-        std::unique_lock<std::mutex> lock(shared_mutex);
-        shared_ready = true;
-        shared_cv.notify_all();
-    }
-  } else {
-    std::unique_lock<std::mutex> lock(shared_mutex);
-    shared_cv.wait(lock, []{ return shared_ready; });
-  }
   if (conn_config.use_xrc)
     cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,
                                fst_client_t);
   else
-    cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,srm_cb,srm_pd);
+    cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,
+                           nullptr, nullptr);
   // Set to some non-zero value so the server can detect READ completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
@@ -1504,8 +1502,6 @@ void run_client(thread_params_t* params) {
   clock_gettime(CLOCK_REALTIME, &run_start);
 
   while (true) {
-    printf("main: Client %zu: %d\n", clt_gid, cb->conn_buf[0]);
-
     clock_gettime(CLOCK_REALTIME, &run_end);
     double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
                          (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
@@ -1514,7 +1510,7 @@ void run_client(thread_params_t* params) {
       printf("main: Client %zu: exiting\n", clt_gid);
       hrd_ctrl_blk_destroy(cb);
       return;
-    } else {
+    } else if (clt_gid == 0) {
       printf("main: Client %zu: active for %.2f seconds (of %zu + %zu)\n",
              clt_gid, run_seconds, FLAGS_run_time, kAppRunTimeSlack);
     }
