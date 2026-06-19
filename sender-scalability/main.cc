@@ -1502,6 +1502,8 @@ void run_client(thread_params_t* params) {
   clock_gettime(CLOCK_REALTIME, &run_start);
 
   while (true) {
+    printf("main: Client %zu: %d\n", clt_gid, cb->conn_buf[0]);
+
     clock_gettime(CLOCK_REALTIME, &run_end);
     double run_seconds = (run_end.tv_sec - run_start.tv_sec) +
                          (run_end.tv_nsec - run_start.tv_nsec) / 1000000000.0;
