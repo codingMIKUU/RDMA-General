@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 128;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
 static constexpr size_t kNativeRcSQDepth = 128;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
@@ -1512,7 +1512,7 @@ void run_client(thread_params_t* params) {
       printf("main: Client %zu: exiting\n", clt_gid);
       hrd_ctrl_blk_destroy(cb);
       return;
-    } else if (clt_gid == 0) {
+    } else {
       printf("main: Client %zu: active for %.2f seconds (of %zu + %zu)\n",
              clt_gid, run_seconds, FLAGS_run_time, kAppRunTimeSlack);
     }
