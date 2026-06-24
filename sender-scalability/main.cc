@@ -41,7 +41,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 2048;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -933,7 +933,29 @@ void run_server_srm(thread_params_t* params) {
 
 
   std::vector<size_t> qp_outstanding(total_remote_qps, 0);
-  size_t next_qp = 0;
+  std::vector<uint8_t> qp_ready_queued(active_remote_qps, 0);
+  std::vector<size_t> qp_ready_queue(active_remote_qps + 1, 0);
+  size_t qp_ready_head = 0;
+  size_t qp_ready_tail = 0;
+  auto qp_ready_empty = [&]() {
+    return qp_ready_head == qp_ready_tail;
+  };
+  auto qp_ready_push = [&](size_t qp_index) {
+    if (qp_index >= active_remote_qps || qp_ready_queued[qp_index] ||
+        qp_outstanding[qp_index] >= kAppUnsigBatch)
+      return;
+    qp_ready_queue[qp_ready_tail] = qp_index;
+    qp_ready_tail = (qp_ready_tail + 1) % qp_ready_queue.size();
+    qp_ready_queued[qp_index] = 1;
+  };
+  auto qp_ready_pop = [&]() {
+    size_t qp_index = qp_ready_queue[qp_ready_head];
+    qp_ready_head = (qp_ready_head + 1) % qp_ready_queue.size();
+    qp_ready_queued[qp_index] = 0;
+    return qp_index;
+  };
+  for (size_t i = 0; i < active_remote_qps; i++)
+    qp_ready_push(i);
   size_t total_outstanding = 0;
   uint64_t stat_post_calls = 0;
   uint64_t stat_post_cycles = 0;
@@ -986,6 +1008,7 @@ void run_server_srm(thread_params_t* params) {
                   "Shared CQ returned QP without outstanding credit");
         qp_outstanding[qp_index]--;
         total_outstanding--;
+        qp_ready_push(qp_index);
       }
 
       if (ret == 0)
@@ -1089,21 +1112,13 @@ void run_server_srm(thread_params_t* params) {
                     "Shared CQ returned QP without outstanding credit");
           qp_outstanding[completed_qp]--;
           total_outstanding--;
+          qp_ready_push(completed_qp);
         }
       }
 
-      cn = active_remote_qps;
-      for (size_t checked = 0; checked < active_remote_qps; checked++) {
-        size_t candidate = next_qp;
-
-        next_qp = (next_qp + 1) % active_remote_qps;
-        if (qp_outstanding[candidate] < kAppUnsigBatch) {
-          cn = candidate;
-          break;
-        }
-      }
-      if (cn == active_remote_qps)
+      if (qp_ready_empty())
         continue;
+      cn = qp_ready_pop();
 
       rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
       nxt_post_wqe_nums =
