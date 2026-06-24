@@ -23,7 +23,7 @@
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
 static constexpr size_t kHrdMaxInline = 1;
-static constexpr size_t kHrdSQDepth = 8000;   ///< Depth of all SEND queues,512.SRM模式时为4096
+static constexpr size_t kHrdSQDepth = 256;   ///< Depth of all SEND queues,512.SRM模式时为4096
 static constexpr size_t kHrdRQDepth = 128;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
@@ -120,6 +120,7 @@ struct hrd_conn_config_t {
 
   // Optional params with their default values
   size_t sq_depth = kHrdSQDepth;
+  size_t cq_depth = 0;  // 0 means use sq_depth
   size_t rq_depth = kHrdRQDepth;
   size_t max_rd_atomic = 16;
 
@@ -128,7 +129,8 @@ struct hrd_conn_config_t {
     ret << "[num_qps " << std::to_string(num_qps) << ", use_uc "
         << std::to_string(use_uc) << ", buf size " << std::to_string(buf_size)
         << ", shm key " << std::to_string(buf_shm_key) << ", sq_depth "
-        << std::to_string(sq_depth) << ", max_rd_atomic "
+        << std::to_string(sq_depth) << ", cq_depth "
+        << std::to_string(cq_depth ? cq_depth : sq_depth) << ", max_rd_atomic "
         << std::to_string(max_rd_atomic) << "]";
     return ret.str();
   }

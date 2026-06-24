@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 128;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 2048;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
 static constexpr size_t kNativeRcSQDepth = 128;
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
@@ -790,6 +790,9 @@ void run_server_srm(thread_params_t* params) {
 
   hrd_conn_config_t conn_config{};
   conn_config.num_qps = remote_peer_count;
+  conn_config.cq_depth =
+      std::max(conn_config.sq_depth,
+               remote_peer_count * static_cast<size_t>(kAppUnsigBatch));
   conn_config.use_uc = (FLAGS_use_uc == 1);
   conn_config.prealloc_buf = nullptr;
   conn_config.buf_size = kAppBufSize;
@@ -1193,10 +1196,10 @@ void run_server_srm(thread_params_t* params) {
         size_t remote_offset = 0;
         // size_t remote_offset = rolling_iter;
         wr.wr.rdma.remote_addr =
-            clt_qp[remote_cn]->buf_addr + remote_offset;
+            clt_qp[0]->buf_addr + remote_offset;
         // printf("发送端的数据缓存区地址: %p\n", sgl.addr);
         // printf("发送端要写入的缓存区地址: %p\n", wr.wr.rdma.remote_addr);
-        wr.wr.rdma.rkey = clt_qp[remote_cn]->rkey;
+        wr.wr.rdma.rkey = clt_qp[0]->rkey;
         wr.qp_type.xrc.remote_srqn = clt_qp[remote_cn]->srqn;
 
         // wr.qp_type.srm.remote_gid.raw[15] = hrd_fastrand(&seed) % 2;//测试多核
@@ -1731,8 +1734,8 @@ int main(int argc, char* argv[]) {
   }
   if(!FLAGS_is_client){
     // 初始化wqe表
-    std::ifstream infile("AliStorage2019_traffic_size.txt");
-    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    //std::ifstream infile("AliStorage2019_traffic_size.txt");
+    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
     int val;
     while (infile >> val) {
       traffic_size.push_back(val);
