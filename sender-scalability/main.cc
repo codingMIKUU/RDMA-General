@@ -41,7 +41,7 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 2048;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 1024;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -1019,7 +1019,7 @@ void run_server_srm(thread_params_t* params) {
       srv_gid == kAppNumServers ? kAppLatBatch : kAppUnsigBatch;
   while (1) {
     if (srv_gid != kAppNumServers) {
-      if (rolling_iter >= KB(64)) {
+      if (rolling_iter >= KB(512)) {
         clock_gettime(CLOCK_REALTIME, &msr_end);
         double msr_seconds =
             (msr_end.tv_sec - msr_start.tv_sec) +
@@ -1128,7 +1128,7 @@ void run_server_srm(thread_params_t* params) {
 
         rt_assert(clt_qp[remote_cn] != nullptr,
                   "SRM remote target QP not connected");
-        if (rolling_iter >= KB(64)) {
+        if (rolling_iter >= KB(512)) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
