@@ -152,6 +152,9 @@ uint64_t seed_array[kAppNumServers + 1];
 std::mutex barrier_mutex;            // 互斥锁保护
 std::condition_variable barrier_cv;  // 条件变量
 int barrier_count = 0;               // 到达线程墙的线程计数
+std::mutex srm_create_mutex;
+std::condition_variable srm_create_cv;
+size_t srm_next_server_create = 0;
 std::mutex shared_mutex;             // 共享cb和pd的互斥锁
 std::condition_variable shared_cv;   // 共享cb和pd的条件变量
 bool shared_ready = false;           // 共享cb和pd是否准备好
@@ -606,8 +609,8 @@ void run_server(thread_params_t* params) {
     }
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      //real_sz = MB(1);
+      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = KB(8);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -730,7 +733,7 @@ void run_server(thread_params_t* params) {
       wr.send_flags = IBV_SEND_SIGNALED;
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = KB(1);
+      real_sz = KB(2);
 
       sgl.addr =
           reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
@@ -802,13 +805,6 @@ void run_server_srm(thread_params_t* params) {
   conn_config.fst_client_t = false;
   hrd_ctrl_blk_t* cb;
 
-  {
-    // 等待逻辑
-    std::unique_lock<std::mutex> lock(barrier_mutex);
-    // 等待条件满足（等待时会释放锁，被唤醒后重新获取锁）
-    barrier_cv.wait(lock, [&]() { return barrier_count == srv_gid; });
-  }
-
   // if (srv_gid == 0) {
   //   srm_cb = new hrd_ctrl_blk_t();
   //   memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
@@ -824,8 +820,19 @@ void run_server_srm(thread_params_t* params) {
   //   shared_cv.wait(lock, []{ return shared_ready; });
   // }
 
+  {
+    std::unique_lock<std::mutex> lock(srm_create_mutex);
+    srm_create_cv.wait(lock, [&]() { return srm_next_server_create == srv_gid; });
+  }
+
   cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 0, &conn_config, nullptr,
                              conn_config.is_client, srm_cb, srm_pd);
+
+  {
+    std::lock_guard<std::mutex> lock(srm_create_mutex);
+    srm_next_server_create++;
+    srm_create_cv.notify_all();
+  }
   //cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
@@ -1182,11 +1189,11 @@ void run_server_srm(thread_params_t* params) {
                 lats[lats.size() * 99 / 100]);
             lats.clear();
           }
-          // hrd_ctrl_blk_destroy(cb);
+          // hrd_ctrl_blk_destroy(cb);f
           // return ;
         }
-        real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        //real_sz = MB(1);
+        //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+        real_sz = KB(2);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
@@ -1271,8 +1278,8 @@ void run_server_srm(thread_params_t* params) {
       }
       
       for(int post_wqe_i = 0; post_wqe_i < nxt_post_wqe_nums; post_wqe_i++){
-        real_sz = KB(1);
-      cn = hrd_fastrand(&seed) % remote_peer_count;
+        real_sz = KB(2);
+        cn = hrd_fastrand(&seed) % remote_peer_count;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
 
@@ -1408,13 +1415,28 @@ void run_client(thread_params_t* params) {
 
   bool fst_client_t = conn_config.fst_client_t;
   hrd_ctrl_blk_t* cb;
+  
+  if (clt_gid == 0) {
+    srm_cb = new hrd_ctrl_blk_t();
+    memset(srm_cb, 0, sizeof(hrd_ctrl_blk_t));
+    hrd_resolve_port_index(srm_cb, 0);
+    srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
+    {
+        std::unique_lock<std::mutex> lock(shared_mutex);
+        shared_ready = true;
+        shared_cv.notify_all();
+    }
+  } else {
+    std::unique_lock<std::mutex> lock(shared_mutex);
+    shared_cv.wait(lock, []{ return shared_ready; });
+  }
  
   if (conn_config.use_xrc)
     cb = hrd_ctrl_blk_init_xrc(clt_gid, ib_port_index, 0, &conn_config, nullptr,
                                fst_client_t);
   else
     cb = hrd_ctrl_blk_init(clt_gid, ib_port_index, 0, &conn_config, nullptr,
-                           nullptr, nullptr);
+                           srm_cb, srm_pd);
   // Set to some non-zero value so the server can detect READ completion
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
 
