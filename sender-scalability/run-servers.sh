@@ -52,7 +52,7 @@ flags="
 # Check for non-gdb mode
 if [ "$#" -eq 0 ]; then
 #   sudo -E ../build/sender-scalability $flags
-  sudo -E numactl --cpunodebind=0 --membind=0 ../build/sender-scalability $flags
+  sudo -E numactl --cpunodebind=1 --membind=1 ../build/sender-scalability $flags
 fi
 
 # Check for gdb mode

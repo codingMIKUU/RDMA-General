@@ -23,8 +23,8 @@
 
 static constexpr size_t kRoCE = true;  ///< Use RoCE
 static constexpr size_t kHrdMaxInline = 1;
-static constexpr size_t kHrdSQDepth = 256;   ///< Depth of all SEND queues,512.SRM模式时为4096
-static constexpr size_t kHrdRQDepth = 128;  ///< Depth of all RECV queues
+static constexpr size_t kHrdSQDepth = 1;   ///< Depth of all SEND queues,512.SRM模式时为4096
+static constexpr size_t kHrdRQDepth = 1;  ///< Depth of all RECV queues
 
 // static constexpr uint32_t kHrdInvalidNUMANode = 9;
 static constexpr uint32_t kHrdInvalidNUMANode = 16;
@@ -161,6 +161,7 @@ struct hrd_ctrl_blk_t {
   } resolve;
 
   struct ibv_pd* pd;  // A protection domain for this control block
+  bool owns_context_and_pd;  // False when context/PD are shared by app threads
   //int xrcd_fd;
   struct ibv_xrcd* xrcd; //XRC domain
 

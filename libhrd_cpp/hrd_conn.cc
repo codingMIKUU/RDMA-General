@@ -1,5 +1,16 @@
 #include "hrd.h"
 #include "fcntl.h"
+
+static void throw_cq_create_error(const hrd_ctrl_blk_t* cb, size_t cq_index) {
+  const int saved_errno = errno;
+  std::ostringstream msg;
+  msg << "Failed to create conn CQ for control block " << cb->local_hid
+      << ", CQ " << cq_index << ": "
+      << (saved_errno == 0 ? "provider returned no errno"
+                           : strerror(saved_errno))
+      << " (errno=" << saved_errno << ")";
+  throw std::runtime_error(msg.str());
+}
 // If @prealloc_conn_buf != nullptr, @conn_buf_size is the size of the
 // preallocated buffer. If @prealloc_conn_buf == nullptr, @conn_buf_size is the
 // size of the new buffer to create.
@@ -77,11 +88,13 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
   if(srm_cb != nullptr && srm_pd != nullptr){
     memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
     cb->pd = srm_pd;
+    cb->owns_context_and_pd = false;
     printf("use srm pd and cb\n");
   } else {
     // Resolve the port into cb->resolve
     hrd_resolve_port_index(cb, port_index);
     cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+    cb->owns_context_and_pd = true;
     printf("use default pd and cb\n");
   }
 
@@ -132,8 +145,8 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init(size_t local_hid, size_t port_index,
   // Create connected QPs and transition them to RTS.
   // Create and register connected QP RDMA buffer.
   if (cb->conn_config.num_qps >= 1) {
-    cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps];
-    cb->conn_cq = new ibv_cq*[cb->conn_config.num_qps];
+    cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps]();
+    cb->conn_cq = new ibv_cq*[cb->conn_config.num_qps]();
 
     hrd_create_conn_qps(cb);
     // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
@@ -242,6 +255,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_xrc(size_t local_hid, size_t port_index
   hrd_resolve_port_index(cb, port_index);
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
   cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+  cb->owns_context_and_pd = true;
 
   //server -> client，client端建立处理XRCD
   if(cb->conn_config.use_xrc&&cb->conn_config.is_client){
@@ -407,12 +421,14 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
   if(srm_cb != nullptr && srm_pd != nullptr){
     memcpy(&cb->resolve,&srm_cb->resolve,sizeof(cb->resolve));
     cb->pd = srm_pd;
+    cb->owns_context_and_pd = false;
     printf("use srm pd and cb\n");
     //sleep(1);
 
   } else {
     hrd_resolve_port_index(cb, port_index);
     cb->pd = ibv_alloc_pd(cb->resolve.ib_ctx);
+    cb->owns_context_and_pd = true;
     printf("error\n");
   }
   // printf("thread %d at line 72: hrd_resolve_port_index()  OK!\n",local_hid);
@@ -439,12 +455,12 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
   // Create connected QPs and transition them to RTS.
   // Create and register connected QP RDMA buffer.
   if(cb->conn_config.num_qps >= 1){
-    cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps];
+    cb->conn_qp = new ibv_qp*[cb->conn_config.num_qps]();
    
   }
-  cb->conn_cq = new ibv_cq*[1];
+  cb->conn_cq = new ibv_cq*[1]();
   if (cb->conn_config.is_client && cb->conn_config.num_srqs > 0)
-    cb->srq = new ibv_srq*[cb->conn_config.num_srqs];
+    cb->srq = new ibv_srq*[cb->conn_config.num_srqs]();
 
   hrd_create_conn_qps_srm(cb);
   // printf("thread %d at line 123: hrd_create_conn_qps()  OK!\n",local_hid);
@@ -488,7 +504,7 @@ struct hrd_ctrl_blk_t* hrd_ctrl_blk_init_srm(size_t local_hid, size_t port_index
 // Free up the resources taken by @cb. Return -1 if something fails, else 0.
 //TODO: Free xrc-related resources
 int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
-  hrd_red_printf("HRD: Destroying control block %d\n", cb->local_hid);
+  hrd_red_printf("HRD: Destroying control block %zu\n", cb->local_hid);
 
   // Destroy QPs and CQs. QPs must be destroyed before CQs.
   for (size_t i = 0; i < cb->num_dgram_qps; i++) {
@@ -596,14 +612,18 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
                 "Failed to close XRCD backing file");
   }
 
-  // Destroy protection domain
-  rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
+  if (cb->owns_context_and_pd) {
+    rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
+    rt_assert(ibv_close_device(cb->resolve.ib_ctx) == 0,
+              "Failed to close device");
+  }
 
-  // Destroy device context
-  rt_assert(ibv_close_device(cb->resolve.ib_ctx) == 0,
-            "Failed to close device");
-
-  hrd_red_printf("HRD: Control block %d destroyed.\n", cb->local_hid);
+  const size_t local_hid = cb->local_hid;
+  delete[] cb->conn_qp;
+  delete[] cb->conn_cq;
+  delete[] cb->srq;
+  delete cb;
+  hrd_red_printf("HRD: Control block %zu destroyed.\n", local_hid);
   return 0;
 }
 
@@ -611,7 +631,7 @@ int hrd_ctrl_blk_destroy(hrd_ctrl_blk_t* cb) {
 // Free up the resources taken by @cb. Return -1 if something fails, else 0.
 //TODO: Free xrc-related resources
 int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
-  hrd_red_printf("HRD_SRM: Destroying control block %d\n", cb->local_hid);
+  hrd_red_printf("HRD_SRM: Destroying control block %zu\n", cb->local_hid);
 
 
 
@@ -654,11 +674,14 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
 
 
   //Destroy XRCD
-  if(cb->conn_config.is_client)
+  if(cb->conn_config.is_client) {
     rt_assert(ibv_close_xrcd(cb->xrcd)==0,"Failed to close XRCD");
+    if (cb->conn_config.xrcd_fd >= 0)
+      rt_assert(close(cb->conn_config.xrcd_fd) == 0,
+                "Failed to close XRCD backing file");
+  }
 
-  // Destroy protection domain
-  if(cb->conn_config.is_client){
+  if (cb->owns_context_and_pd) {
     rt_assert(ibv_dealloc_pd(cb->pd) == 0, "Failed to dealloc PD");
 
     // Destroy device context
@@ -670,7 +693,12 @@ int hrd_ctrl_blk_destroy_srm(hrd_ctrl_blk_t* cb) {
   //   rt_assert(ibv_destroy_ah(cb->ahs[i]),"Failed to destroy ah");
   // }
 
-  hrd_red_printf("HRD: Control block %d destroyed.\n", cb->local_hid);
+  const size_t local_hid = cb->local_hid;
+  delete[] cb->conn_qp;
+  delete[] cb->conn_cq;
+  delete[] cb->srq;
+  delete cb;
+  hrd_red_printf("HRD: Control block %zu destroyed.\n", local_hid);
   return 0;
 }
 // Create datagram QPs and transition them to RTS
@@ -774,11 +802,12 @@ void hrd_create_conn_qps(hrd_ctrl_blk_t* cb) {
 
   for (size_t i = 0; i < cb->conn_config.num_qps; i++) {
     //CQ不需要PD
+    errno = 0;
     cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
                                    nullptr, nullptr, 0);
     // We sometimes set Mellanox env variables for hugepage-backed queues.
-    rt_assert(cb->conn_cq[i] != nullptr,
-              "Failed to create conn CQ. Check hugepages and SHM limits?");
+    if (cb->conn_cq[i] == nullptr)
+      throw_cq_create_error(cb, i);
 
 #if (kHrdMlx5Atomics == false)
     struct ibv_qp_init_attr create_attr;
@@ -874,10 +903,11 @@ void hrd_create_conn_qps_xrc(hrd_ctrl_blk_t* cb) {
   assert(resource_count >= 1 && cb->resolve.dev_port_id >= 1);
 
   for (size_t i = 0; i < resource_count; i++) {
+    errno = 0;
     cb->conn_cq[i] = ibv_create_cq(cb->resolve.ib_ctx, cb->conn_config.sq_depth,
                                    nullptr, nullptr, 0);
-    rt_assert(cb->conn_cq[i] != nullptr,
-              "Failed to create conn CQ. Check hugepages and SHM limits?");
+    if (cb->conn_cq[i] == nullptr)
+      throw_cq_create_error(cb, i);
 
     if (cb->conn_config.is_client && i < cb->conn_config.num_srqs) {
       ibv_srq_init_attr_ex srq_init_attr;
@@ -995,6 +1025,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
   //assert((cb->conn_config.num_qps >= 1 ||cb->conn_config.rnum_threads>=1) && cb->resolve.dev_port_id >= 1);
 
 
+  errno = 0;
   cb->conn_cq[0] =
       ibv_create_cq(cb->resolve.ib_ctx,
                     cb->conn_config.cq_depth
@@ -1002,8 +1033,8 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
                         : cb->conn_config.sq_depth,
                     nullptr, nullptr, 0);
   // We sometimes set Mellanox env variables for hugepage-backed queues.
-  rt_assert(cb->conn_cq[0] != nullptr,
-            "Failed to create conn CQ. Check hugepages and SHM limits?");
+  if (cb->conn_cq[0] == nullptr)
+    throw_cq_create_error(cb, 0);
 
 
   if (cb->conn_config.is_client && cb->conn_config.num_srqs > 0) {

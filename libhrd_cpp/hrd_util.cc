@@ -117,8 +117,8 @@ void hrd_resolve_port_index(struct hrd_ctrl_blk_t* cb, size_t phy_port) {
               ". Try setting kRoCE to false.");
         }
 
-        // printf("HRD: port index %zu resolved to device %d, port %d. Name %s.\n",
-        //        phy_port, dev_i, port_i, dev_list[dev_i]->name);
+        printf("HRD: port index %zu resolved to device %d, port %d. Name %s.\n",
+               phy_port, dev_i, port_i, dev_list[dev_i]->name);
 
         resolve.device_id = dev_i;
         resolve.ib_ctx = ib_ctx;
@@ -189,7 +189,7 @@ uint8_t* hrd_malloc_socket(int shm_key, size_t size, size_t socket_id) {
   }
 
   uint8_t* buf = static_cast<uint8_t*>(shmat(shmid, nullptr, 0));
-  if (buf == nullptr) {
+  if (buf == reinterpret_cast<uint8_t*>(-1)) {
     printf("HRD: SHM malloc error: shmat() failed for key %d\n", shm_key);
     exit(-1);
   }

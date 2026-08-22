@@ -40,8 +40,8 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 1024;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 128;
+static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -250,7 +250,7 @@ void print_qp_info(struct hrd_qp_attr_t* info) {
 std::vector<uint64_t>cpu_cycles,ps_cycles;
 void run_server(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
-  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  size_t ib_port_index = 1;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   const size_t xrc_qps_per_server =
       FLAGS_use_xrc ? static_cast<size_t>(FLAGS_xrc_qps_per_server) : 1;
@@ -295,10 +295,10 @@ void run_server(thread_params_t* params) {
 
   hrd_ctrl_blk_t* cb;
   if (conn_config.use_xrc == 0)
-    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+    cb = hrd_ctrl_blk_init(srv_gid, ib_port_index, 1, &conn_config, nullptr,
                            nullptr, nullptr);
   else
-    cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+    cb = hrd_ctrl_blk_init_xrc(srv_gid, ib_port_index, 1, &conn_config, nullptr,
                                0);
   // Set the buffer to 0 so that we can detect READ completion by polling.
   memset(const_cast<uint8_t*>(cb->conn_buf), 0, kAppBufSize);
@@ -610,7 +610,7 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = KB(8);
+      real_sz = KB(32);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -733,7 +733,7 @@ void run_server(thread_params_t* params) {
       wr.send_flags = IBV_SEND_SIGNALED;
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
-      real_sz = KB(2);
+      real_sz = KB(1);
 
       sgl.addr =
           reinterpret_cast<uint64_t>(&cb->conn_buf[window_i * FLAGS_size]);
@@ -785,7 +785,7 @@ void run_server(thread_params_t* params) {
 
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
-  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  size_t ib_port_index = 1;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   size_t remote_peer_count = (srv_gid == kAppNumServers && FLAGS_test_lat_thread)
                                  ? 1
@@ -825,7 +825,7 @@ void run_server_srm(thread_params_t* params) {
     srm_create_cv.wait(lock, [&]() { return srm_next_server_create == srv_gid; });
   }
 
-  cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 0, &conn_config, nullptr,
+  cb = hrd_ctrl_blk_init_srm(srv_gid, ib_port_index, 1, &conn_config, nullptr,
                              conn_config.is_client, srm_cb, srm_pd);
 
   {
@@ -1193,7 +1193,7 @@ void run_server_srm(thread_params_t* params) {
           // return ;
         }
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = KB(2);
+        real_sz = KB(32);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
@@ -1278,7 +1278,7 @@ void run_server_srm(thread_params_t* params) {
       }
       
       for(int post_wqe_i = 0; post_wqe_i < nxt_post_wqe_nums; post_wqe_i++){
-        real_sz = KB(2);
+        real_sz = KB(1);
         cn = hrd_fastrand(&seed) % remote_peer_count;
         rt_assert(cn < total_remote_qps, "Invalid SRM remote QP index");
         rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
