@@ -43,9 +43,10 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 static constexpr size_t kAppNumServers = 16;
 static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
 static constexpr size_t kNativeRcSQDepth = 128;
+static_assert(kAppUnsigBatch > 0, "Hollow RC completion window must be non-zero");
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -1013,8 +1014,14 @@ void run_server_srm(thread_params_t* params) {
                   "Invalid QP index in shared CQ wr_id");
         rt_assert(qp_outstanding[qp_index] > 0,
                   "Shared CQ returned QP without outstanding credit");
-        qp_outstanding[qp_index]--;
-        total_outstanding--;
+        const size_t completed_wqes = qp_outstanding[qp_index];
+        rt_assert(completed_wqes > 0 &&
+                      completed_wqes <= kAppUnsigBatch,
+                  "Invalid fixed-window Hollow RC completion span");
+        rt_assert(total_outstanding >= completed_wqes,
+                  "Invalid total Hollow RC outstanding credit");
+        qp_outstanding[qp_index] = 0;
+        total_outstanding -= completed_wqes;
         qp_ready_push(qp_index);
       }
 
@@ -1117,8 +1124,14 @@ void run_server_srm(thread_params_t* params) {
                     "Invalid QP index in shared CQ wr_id");
           rt_assert(qp_outstanding[completed_qp] > 0,
                     "Shared CQ returned QP without outstanding credit");
-          qp_outstanding[completed_qp]--;
-          total_outstanding--;
+          const size_t completed_wqes = qp_outstanding[completed_qp];
+          rt_assert(completed_wqes > 0 &&
+                        completed_wqes <= kAppUnsigBatch,
+                    "Invalid fixed-window Hollow RC completion span");
+          rt_assert(total_outstanding >= completed_wqes,
+                    "Invalid total Hollow RC outstanding credit");
+          qp_outstanding[completed_qp] = 0;
+          total_outstanding -= completed_wqes;
           qp_ready_push(completed_qp);
         }
       }
@@ -1135,7 +1148,10 @@ void run_server_srm(thread_params_t* params) {
 
         rt_assert(clt_qp[remote_cn] != nullptr,
                   "SRM remote target QP not connected");
-        if (rolling_iter >= KB(512)) {
+        /* Never terminate or reset accounting in the middle of an
+         * unsignaled completion window: its closing signaled WQE has not
+         * been posted yet, so it cannot be drained from the CQ. */
+        if (rolling_iter >= KB(512) && post_wqe_i == 0) {
           clock_gettime(CLOCK_REALTIME, &msr_end);
           double msr_seconds =
               (msr_end.tv_sec - msr_start.tv_sec) +
@@ -1193,7 +1209,7 @@ void run_server_srm(thread_params_t* params) {
           // return ;
         }
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = KB(1);
+        real_sz = KB(2);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
@@ -1209,7 +1225,15 @@ void run_server_srm(thread_params_t* params) {
         wr.wr_id = (static_cast<uint64_t>(cn) << 32) |
                    (rolling_iter & 0xffffffffULL);
 
-        wr.send_flags =IBV_SEND_SIGNALED;
+        /*
+         * Fixed-window CQ moderation: only the WQE that closes this
+         * logical QP's window requests a CQE.  Its completion cumulatively
+         * acknowledges every earlier unsignaled WQE in the same window.
+         */
+        wr.send_flags =
+            qp_outstanding[cn] + 1 == kAppUnsigBatch
+                ? IBV_SEND_SIGNALED
+                : 0;
 
         sgl.addr = reinterpret_cast<uint64_t>(&cb->conn_buf[0]);
         sgl.length = real_sz;
