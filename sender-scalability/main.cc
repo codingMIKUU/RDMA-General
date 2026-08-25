@@ -41,9 +41,9 @@ static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
 static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
+static constexpr size_t kAppNumClients = 512;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 4;//qp的总size需要是batch的两倍，原因是聚合。
+static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
 static constexpr size_t kNativeRcSQDepth = 128;
 static_assert(kAppUnsigBatch > 0, "Hollow RC completion window must be non-zero");
@@ -1141,6 +1141,9 @@ void run_server_srm(thread_params_t* params) {
       cn = qp_ready_pop();
 
       rt_assert(clt_qp[cn] != nullptr, "SRM remote QP not connected");
+      rt_assert(qp_outstanding[cn] == 0,
+                "Hollow RC watermark CQ requires one pending completion "
+                "window per logical QP");
       nxt_post_wqe_nums =
           static_cast<int>(kAppUnsigBatch - qp_outstanding[cn]);
       for(int post_wqe_i = 0;post_wqe_i < nxt_post_wqe_nums;post_wqe_i++){
@@ -1209,7 +1212,7 @@ void run_server_srm(thread_params_t* params) {
           // return ;
         }
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = KB(2);
+        real_sz = KB(1);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
