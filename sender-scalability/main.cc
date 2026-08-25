@@ -40,8 +40,8 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 128;
-static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumClients = 64;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
@@ -610,7 +610,7 @@ void run_server(thread_params_t* params) {
 
       // wr.send_flags |= (FLAGS_do_read == 0) ? IBV_SEND_INLINE : 0;
       //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-      real_sz = KB(32);
+      real_sz = KB(2);
       // if(hrd_fastrand(&seed)%2==1) real_sz =304;
       // else real_sz = KB(4);
       // real_sz = 32;
@@ -1193,7 +1193,7 @@ void run_server_srm(thread_params_t* params) {
           // return ;
         }
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = KB(32);
+        real_sz = KB(1);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
@@ -1242,6 +1242,17 @@ void run_server_srm(thread_params_t* params) {
         if (FLAGS_srm_app_stats) {
           stat_post_calls++;
           stat_post_cycles += rdtsc() - post_start;
+        }
+
+        if (unlikely(ret != 0)) {
+          fprintf(stderr,
+                  "SRM post_send failed: ret=%d (%s) errno=%d (%s) "
+                  "srv=%zu cn=%zu qpn=%u rolling_iter=%zu "
+                  "qp_outstanding=%zu total_outstanding=%zu bad_wr=%p wr=%p\n",
+                  ret, strerror(ret), errno, strerror(errno), srv_gid, cn,
+                  cb->conn_qp[cn]->qp_num, rolling_iter,
+                  qp_outstanding[cn], total_outstanding,
+                  static_cast<void*>(bad_send_wr), static_cast<void*>(&wr));
         }
 
         // //文件
@@ -1313,6 +1324,14 @@ void run_server_srm(thread_params_t* params) {
 
         //st_lat = lat_st;
         int ret = ibv_post_send(cb->conn_qp[cn], &wr, &bad_send_wr);
+        if (unlikely(ret != 0)) {
+          fprintf(stderr,
+                  "SRM latency post_send failed: ret=%d (%s) errno=%d (%s) "
+                  "srv=%zu cn=%zu qpn=%u rolling_iter=%zu bad_wr=%p wr=%p\n",
+                  ret, strerror(ret), errno, strerror(errno), srv_gid, cn,
+                  cb->conn_qp[cn]->qp_num, rolling_iter,
+                  static_cast<void*>(bad_send_wr), static_cast<void*>(&wr));
+        }
         rt_assert(ret == 0);
         rolling_iter++;
 
