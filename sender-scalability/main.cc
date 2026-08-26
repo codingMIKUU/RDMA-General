@@ -40,8 +40,8 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
-static constexpr size_t kAppNumClients = 512;  // Total client QPs in cluster
+static constexpr size_t kAppNumServers = 128;
+static constexpr size_t kAppNumClients = 8;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
