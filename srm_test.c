@@ -197,7 +197,6 @@ int main() {
     struct ibv_pd *pd;
     struct ibv_xrcd *xrcd;
     memset(&ah_attr,0,sizeof(ah_attr));
-    ah_attr.check_xrc = 2;
     ah_attr.dlid = 0;
     ah_attr.is_global = 1;
     ah_attr.src_path_bits = 0;

@@ -272,6 +272,7 @@ void test_xrc_ini_and_kernel_tgt(struct ibv_pd *pd,union ibv_gid *gid,struct ibv
     struct ibv_qp *qp;
     struct ibv_qp_init_attr_ex create_attr;
     struct ibv_qp_info local_qp_info,remote_qp_info;
+    struct ibv_srm_ah_attr srm_ah_attr;
     struct ibv_cq *cq;
     const int sq_depth = 256;
     const int cq_depth = 256;
@@ -316,10 +317,12 @@ void test_xrc_ini_and_kernel_tgt(struct ibv_pd *pd,union ibv_gid *gid,struct ibv
 
     ah_attr->grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
     ah_attr->grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
-    ah_attr->dqpn = qp->qp_num;
-    struct ibv_ah *ah = ibv_create_ah_srm(pd, ah_attr, xrcd,
+    memset(&srm_ah_attr, 0, sizeof(srm_ah_attr));
+    srm_ah_attr.ah_attr = *ah_attr;
+    srm_ah_attr.check_xrc = 2;
+    srm_ah_attr.dqpn = qp->qp_num;
+    struct ibv_ah *ah = ibv_create_ah_srm(pd, &srm_ah_attr, xrcd,
                                           &local_qp_info, &remote_qp_info);
-    local_qp_info.qpn = ah->srmc_flags;
     // struct ibv_qp *tgt_qp = create_xrc_tgt(pd,xrcd,&local_qp_info,&remote_qp_info);
     //modify qp
     memset(&conn_attr,0,sizeof conn_attr);
@@ -483,7 +486,6 @@ int main() {
     struct ibv_pd *pd;
     struct ibv_xrcd *xrcd;
     memset(&ah_attr,0,sizeof(ah_attr));
-    ah_attr.check_xrc = 2;
     ah_attr.dlid = 0;
     ah_attr.is_global = 1;
     ah_attr.src_path_bits = 0;
@@ -602,8 +604,12 @@ int main() {
         //TODO: create ah to create the tgt qp. what attrs of ah are needed?
         ah_attr.grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
         ah_attr.grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
-        ah_attr.dqpn = remote_qp_info.qpn;
-        struct ibv_ah *ah = ibv_create_ah_srm(pd, &ah_attr, xrcd,
+        struct ibv_srm_ah_attr srm_ah_attr;
+        memset(&srm_ah_attr, 0, sizeof(srm_ah_attr));
+        srm_ah_attr.ah_attr = ah_attr;
+        srm_ah_attr.check_xrc = 2;
+        srm_ah_attr.dqpn = remote_qp_info.qpn;
+        struct ibv_ah *ah = ibv_create_ah_srm(pd, &srm_ah_attr, xrcd,
                                               &local_qp_info,
                                               &remote_qp_info);
         if(ah == NULL){
@@ -611,8 +617,6 @@ int main() {
             close(newsockfd);
             goto err;
         }
-        local_qp_info.qpn =  ah->srmc_flags;
-
         printf("Sending local QP info:\n");
         print_qp_info(&local_qp_info);
         // local_qp_info.qpn = htonl(local_qp_info.qpn);
