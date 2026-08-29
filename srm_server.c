@@ -317,7 +317,8 @@ void test_xrc_ini_and_kernel_tgt(struct ibv_pd *pd,union ibv_gid *gid,struct ibv
     ah_attr->grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
     ah_attr->grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
     ah_attr->dqpn = qp->qp_num;
-    struct ibv_ah *ah = ibv_create_ah(pd,ah_attr,xrcd,&local_qp_info,&remote_qp_info);
+    struct ibv_ah *ah = ibv_create_ah_srm(pd, ah_attr, xrcd,
+                                          &local_qp_info, &remote_qp_info);
     local_qp_info.qpn = ah->srmc_flags;
     // struct ibv_qp *tgt_qp = create_xrc_tgt(pd,xrcd,&local_qp_info,&remote_qp_info);
     //modify qp
@@ -602,7 +603,9 @@ int main() {
         ah_attr.grh.dgid.global.interface_id = remote_qp_info.gid.global.interface_id;
         ah_attr.grh.dgid.global.subnet_prefix = remote_qp_info.gid.global.subnet_prefix;
         ah_attr.dqpn = remote_qp_info.qpn;
-        struct ibv_ah *ah = ibv_create_ah(pd,&ah_attr,xrcd,&local_qp_info,&remote_qp_info);
+        struct ibv_ah *ah = ibv_create_ah_srm(pd, &ah_attr, xrcd,
+                                              &local_qp_info,
+                                              &remote_qp_info);
         if(ah == NULL){
             printf("Failed to create AH\n");
             close(newsockfd);
