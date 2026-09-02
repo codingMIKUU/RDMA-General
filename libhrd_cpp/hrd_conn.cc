@@ -1043,6 +1043,7 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
     srq_init_attr.comp_mask = IBV_SRQ_INIT_ATTR_TYPE | IBV_SRQ_INIT_ATTR_XRCD |
                               IBV_SRQ_INIT_ATTR_CQ | IBV_SRQ_INIT_ATTR_PD;
     srq_init_attr.srq_type = IBV_SRQT_XRC;
+		srq_init_attr.hollow_rc = 1;
     srq_init_attr.xrcd = cb->xrcd;
     srq_init_attr.pd = cb->pd;
     srq_init_attr.cq = cb->conn_cq[0];
