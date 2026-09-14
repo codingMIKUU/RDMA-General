@@ -45,7 +45,7 @@ static constexpr size_t kAppNumClients = 256;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
 static constexpr size_t kAppUnsigBatch = 1;//qp的总size需要是batch的两倍，原因是聚合。
 static constexpr size_t kAppLatBatch = 1; 
-static constexpr size_t kNativeRcSQDepth = 1;
+static constexpr size_t kNativeRcSQDepth = 4;
 static_assert(kAppUnsigBatch > 0, "Hollow RC completion window must be non-zero");
 // static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
@@ -1212,7 +1212,7 @@ void run_server_srm(thread_params_t* params) {
           // return ;
         }
         //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
-        real_sz = KB(8);
+        real_sz = KB(2);
         // if(hrd_fastrand(&seed)%2 ==1) real_sz = KB(4);
         // else real_sz = 304;
 
