@@ -1079,6 +1079,18 @@ void hrd_create_conn_qps_srm(hrd_ctrl_blk_t* cb) {
 	    }
 	    create_attr.sender_side = cb->conn_config.is_client ? 0 : 1;
 	    create_attr.skip_kern_qp = cb->conn_config.is_client ? 1 : 0;
+#ifdef IBV_QP_CREATE_SRM_LATENCY_CQ
+    // Explicit identity: the last sender thread, not the last allocated QPN.
+    if (!cb->conn_config.is_client && cb->conn_config.isSmall) {
+      create_attr.comp_mask |= IBV_QP_INIT_ATTR_CREATE_FLAGS;
+      create_attr.create_flags |= IBV_QP_CREATE_SRM_LATENCY_CQ;
+      fprintf(stderr, "HRD: latency CQ hint thread=%zu qp=%d\n",
+              cb->local_hid, i);
+    }
+#else
+    if (!cb->conn_config.is_client && cb->conn_config.isSmall)
+      fprintf(stderr, "HRD: latency CQ priority unavailable in verbs headers\n");
+#endif
 	    //create_attr.rnode_num = cb->conn_config.num_qps;
     //create_attr.srm_app_threads = cb->conn_config.srm_app_threads;
     //create_attr.srm_xrc_qp_num_per_srm = cb->conn_config.srm_xrc_qp_num_per_srm;
