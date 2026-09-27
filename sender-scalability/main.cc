@@ -31,10 +31,10 @@ static const char* SERVER_XRCD_FILE_PATH = "/tmp/server_xrcd";
 static_assert(is_power_of_two(kAppWindowSize), "");
 
 // Sweep paramaters
-static constexpr size_t kAppNumServers = 16;
+static constexpr size_t kAppNumServers = 128;
 static constexpr size_t kAppNumClients = 1;  // Total client QPs in cluster
 static constexpr size_t kAppNumClientMachines = 1;
-static constexpr size_t kAppUnsigBatch = 64;
+static constexpr size_t kAppUnsigBatch = 32;
 //static_assert(kHrdSQDepth == 128, "");  // Small queues => more scalaing
 static_assert(kAppNumClients % kAppNumClientMachines == 0, "");
 
@@ -389,7 +389,7 @@ void run_server(thread_params_t* params) {
 
 void run_server_srm(thread_params_t* params) {
   size_t srv_gid = params->id;  // Global ID of this server thread
-  size_t ib_port_index = FLAGS_dual_port == 0 ? 0 : srv_gid % 2;
+  size_t ib_port_index = 1;
   int shm_key = kAppBaseSHMKey + static_cast<int>(srv_gid);
   int clt_num_threads = kAppNumClients/kAppNumClientMachines;
 
@@ -418,7 +418,7 @@ void run_server_srm(thread_params_t* params) {
     }
   }
 
-  cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,0,&conn_config,nullptr,conn_config.is_client,srm_cb,srm_pd);
+  cb = hrd_ctrl_blk_init_srm(srv_gid,ib_port_index,1,&conn_config,nullptr,conn_config.is_client,srm_cb,srm_pd);
   cb->ahs = new ibv_ah*[kAppNumClientMachines];
   // Set the buffer to 1 so that we can detect WRITE completion in client.
   memset(const_cast<uint8_t*>(cb->conn_buf), 1, kAppBufSize);
@@ -576,8 +576,8 @@ void run_server_srm(thread_params_t* params) {
       cn = (cn + 1)%kAppNumClients;
       qp_cn = cn/clt_num_threads;
 
-      //real_sz = 4096;
-      real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
+      real_sz = KB(2);
+      //real_sz = traffic_size[hrd_fastrand(&seed) % traffic_size.size()];
 
       if (nb_tx[qp_cn] % kAppUnsigBatch == 0 && nb_tx[qp_cn] > 0 &&!FLAGS_test_lat) {
         //printf("ready to poll cq\n");
@@ -1012,7 +1012,8 @@ int main(int argc, char* argv[]) {
   rt_assert(kAppNumClients%kAppNumClientMachines==0,"NumClients must can be div by NumMachines");
 
     //初始化wqe表
-    std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    //std::ifstream infile("Twitter-cluster12_traffic_size.txt");
+    std::ifstream infile("AliStorage2019_traffic_size.txt");
     int val;
     while(infile>>val){
       traffic_size.push_back(val);
@@ -1052,7 +1053,7 @@ int main(int argc, char* argv[]) {
   if(FLAGS_use_srm && !FLAGS_is_client){
     srm_cb = new hrd_ctrl_blk_t();
     memset(srm_cb,0,sizeof(hrd_ctrl_blk_t));
-    hrd_resolve_port_index(srm_cb,0);
+    hrd_resolve_port_index(srm_cb,1);
     srm_pd = ibv_alloc_pd(srm_cb->resolve.ib_ctx);
   }
   for (size_t i = 0; i < num_threads; i++) {
